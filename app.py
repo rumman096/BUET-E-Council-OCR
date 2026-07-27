@@ -81,66 +81,96 @@ CHUNK_PROMPT = (
     "English documents. Extract ALL "
     "text from every page of this PDF exactly as it appears. Silently analyze EACH PAGE's layout "
     "independently before deciding its reading order; never output the analysis itself."
+
     "\n\nCOMPLETENESS RULES (mandatory):"
+
     "\nA. Before each page's content, write a line exactly like: '=== PAGE n ===' where n is the "
     "page number WITHIN THIS PDF, starting at 1 and increasing by exactly 1 for every page."
+
     "\nB. Never skip, merge, or reorder pages. If a page is blank, still print its marker followed "
     "by nothing."
+
     "\nC. Never stop early: the final marker's number must equal the total number of pages in this "
     "PDF, and every page in between must have its own marker."
+
+    "\nD. Output each supplied page EXACTLY ONCE. After transcribing the final supplied page, STOP "
+    "immediately. Never restart from PAGE 1, never repeat any page, and never output the complete "
+    "document a second time. Do not provide a second transcription, corrected transcription, "
+    "alternative reading, revised version, summary, or duplicate copy. The complete output must "
+    "contain exactly one page marker for each supplied page, in the exact sequence "
+    "PAGE 1, PAGE 2, PAGE 3, and so on through the final page."
+
     "\n\nPAGE-LAYOUT READING ORDER RULES:"
+
     "\n1. If a page has a normal single-column layout, read it naturally from top to bottom."
+
     "\n2. Treat an area as a true PAGE COLUMN only when it is a large, independent vertical text "
     "region separated from another region by a clear vertical gutter and each region has its own "
     "continuous top-to-bottom reading flow."
+
     "\n3. Do NOT identify columns merely because words, names, roles, designations, offices, status "
     "labels, numbers, or other fields are horizontally separated on the same line or inside the same "
     "list entry. Horizontal spacing inside one record is not a page-column boundary."
+
     "\n4. In attendee/member lists, each numbered entry is one logical record. Read all text belonging "
     "to that record together before moving to the next numbered entry. A person's name, designation, "
     "department, office, and role/status such as 'সভাপতি' or 'সদস্য' must remain with that same person. "
     "Do not move the role/status into a separate column or read it later."
+
     "\n5. For text on the same visual row inside one logical record, preserve the natural left-to-right "
     "field order. Read the person's name and details first, then the role/status printed to the right "
     "on that same row."
+
     "\n6. If a page truly has two or more large independent page columns, read the LEFTMOST main column "
     "completely from top to bottom first. Then read the next main column to its right completely from "
     "top to bottom. Continue from left to right until all true page columns are finished."
+
     "\n7. A heading, title, date, introductory paragraph, or any text spanning the full page width above "
     "the columns must be read before the columns. Full-width text below the columns must be read after "
     "all columns are completed."
+
     "\n8. The page-column rule does NOT apply to tables, tabular attendee rows, aligned lists, forms, "
     "or multi-field records. Preserve each table or tabular list in logical row order. For a Markdown "
     "table, keep the entire table together with one header row, one separator row, and every data row. "
     "Never split table cells or aligned fields into separate page columns."
+
     "\n9. Use vertical alignment across a substantial portion of the page to detect true columns. "
     "Short labels such as 'সভাপতি', 'সদস্য', page numbers, or isolated right-aligned text do not create "
     "a new page column."
+
     "\n10. If you are ever uncertain whether a page has true columns, treat it as a SINGLE column and "
     "read top to bottom — a wrong column split is far worse than a conservative single-column read."
+
     "\n\nBENGALI SCRIPT FIDELITY RULES:"
+
     "\n11. Transcribe Bengali exactly as printed. Carefully distinguish visually similar forms: "
     "ি vs ী, ু vs ূ, ে vs ৈ, ব vs র, য vs য়, ড vs ড়, ঢ vs ঢ়, ত vs ৎ, ং vs ঁ vs ঃ, ল vs ন, ঘ vs য, "
     "শ vs ষ vs স, ছ vs স, ণ vs ন, ই vs ঈ. Also preserve the presence or ABSENCE of চন্দ্রবিন্দু "
     "exactly as printed (খান vs খাঁন are different spellings)."
+
     "\n12. Preserve every conjunct (যুক্তাক্ষর) exactly as printed — e.g. ক্ষ, জ্ঞ, ত্ত, ন্ত, স্ত, ষ্ট, ন্ড, ঙ্গ, "
     "চ্ছ, দ্ধ, ম্ব — and never drop or reorder reph, র-ফলা, or য-ফলা (র্ক, ক্র, ক্য). Distinguish "
     "similar-looking conjuncts: ন্ন vs ন্দ, শ vs স in conjuncts (মোশতাক vs মোস্তাক), ল vs ল্ল "
     "(শাকিলা vs শাকিল্লা) — in PERSON NAMES especially, copy the printed form letter-by-letter "
     "rather than the more common spelling of a similar name."
+
     "\n13. Use ONLY Bengali script for Bengali words. Never substitute visually similar Devanagari, "
     "Assamese (ৰ, ৱ), Latin, or Arabic characters inside a Bengali word."
+
     "\n14. Keep Bengali numerals (০১২৩৪৫৬৭৮৯) exactly as printed; do not convert them to 0-9 or vice "
     "versa. Copy dates, reference numbers (স্মারক নং), and serial numbers digit-for-digit."
+
     "\n15. Preserve honorifics and abbreviations exactly as printed: অধ্যাপক, ডঃ, ড., জনাব, মোঃ, মোছাঃ. "
     "Keep the danda '।' where printed; never replace it with '.'. NEVER expand a printed "
     "abbreviation to its full form, even when you are 100% certain what it stands for: "
     "'ত.ই কৌশল অনুষদ' stays 'ত.ই কৌশল অনুষদ' (NOT 'তড়িৎ ও ইলেক্ট্রনিক কৌশল অনুষদ'), "
     "'ইলেকঃ' stays 'ইলেকঃ', 'ইঞ্জিঃ' stays 'ইঞ্জিঃ', 'সি.এস.ই' stays 'সি.এস.ই', "
     "'পরিঃ' stays 'পরিঃ' (NOT 'পরিশিষ্ট'), 'স্বাঃ' stays 'স্বাঃ', 'অনুঃ' stays 'অনুঃ'."
+
     "\n16. Preserve headings, paragraphs, list order, line breaks, names, dates, numbers, punctuation, "
     "and tables precisely. Do not omit duplicated-looking text unless it is clearly a repeated page "
     "header or footer."
+
     "\n16b. ANTI-DRIFT RULE for numbered lists (attendee lists, dean lists, department-head lists) "
     "where every entry has the same shape: transcribe each entry's affiliation from ITS OWN printed "
     "line only. Adjacent entries often differ by exactly one word (e.g. 'ডীন, যন্ত্রকৌশল অনুষদ' vs "
@@ -148,6 +178,7 @@ CHUNK_PROMPT = (
     "the image for THIS entry. Never assume it equals the entry above or below. Each faculty has "
     "exactly one ডীন and each department exactly one প্রধান, so two entries with identical "
     "affiliations usually mean you mis-copied one."
+
     "\n16c. NEVER RENUMBER A LIST. Copy every numbered item's printed number digit-for-digit even "
     "if the resulting sequence then has a gap or a repeat — the page is the authority, not the "
     "sequence. If an item's number is unreadable (damaged margin, stain, fold), write [?]। before "
@@ -155,29 +186,36 @@ CHUNK_PROMPT = (
     "look sequential — a silently renumbered list is a severe error. An unnumbered paragraph at "
     "the TOP of a page may be a NEW item whose number sits at the damaged page edge: inspect the "
     "left margin carefully before treating it as a continuation of the previous item."
+
     "\n\nHANDWRITING & DEGRADED-DOCUMENT RULES:"
+
     "\n17. The document may be entirely HANDWRITTEN, decades old, faded, stained, photocopied, or "
     "low-contrast. Apply every rule above to handwriting too. Read stroke by stroke; use the "
     "document's own recurring vocabulary (the same names, departments, offices, and faculties "
     "appear on multiple lines) to resolve an ambiguous letter — but only to disambiguate what is "
     "actually written, never to substitute a different word."
+
     "\n18. Old minutes often abbreviate: প্রফেঃ / প্রফেসর (Professor), সহযোগী প্রফেঃ, ডঃ / ড. / ডীন, "
     "অনুঃ (অনুষদ), পরিঃ (পরিশিষ্ট), স্বাঃ (স্বাক্ষর), ভাইস চ্যান্সেলার. Transcribe every abbreviation "
     "EXACTLY as written; never expand it."
+
     "\n19. In attendee lists a ditto mark — 〃, \", or the typed English \"-do-\" — means 'same as "
     "the line above'. Transcribe the ditto mark itself exactly as printed (〃 or -do-) at its "
     "position in the line. Never drop it and never replace it with the expanded text."
+
     "\n20. If a word is truly illegible after careful analysis, write [?] in its place instead of "
     "guessing an unrelated word. Use [?] sparingly — most degraded words CAN be read from strokes "
     "plus context. Never invent names, numbers, or dates for illegible text."
+
     "\n21. PRINTED documents often carry HANDWRITTEN additions: dates written beside signatures, "
     "reference numbers, corrections, or marginal notes. Transcribe these too, at their position — "
     "a handwritten date under or next to a signature belongs with that signature block. Do not "
     "transcribe the signature strokes themselves."
-    "\n\nOUTPUT FORMAT: Only the extracted text in Markdown. Do not add commentary, explanations, "
-    "layout labels such as 'left column' or 'right column', translations, or notes."
-)
 
+    "\n\nOUTPUT FORMAT: Only the extracted text in Markdown. Do not add commentary, explanations, "
+    "layout labels such as 'left column' or 'right column', translations, or notes. Output every "
+    "page exactly once and stop immediately after the final page's transcription."
+)
 
 def chunk_prompt_for(input_mode: str, expected_pages: int) -> str:
     """Return the OCR prompt adapted to the request payload type."""
