@@ -2,6 +2,7 @@ import time
 import html
 import hashlib
 import io
+import os
 import json
 import math
 import random
@@ -45,17 +46,23 @@ except ImportError:
 # ==========================================
 # GEMINI API KEYS — ADMINISTRATOR CONFIGURATION
 # ==========================================
-# Paste keys from separate authorised Google Cloud projects below.
-# Empty entries are ignored automatically. Keep this file/repository PRIVATE;
-# never commit real API keys to a public GitHub repository.
+# In Streamlit Community Cloud, store the keys in App settings → Secrets:
+#
+# GEMINI_API_KEYS = ["KEY_1", "KEY_2", "KEY_3"]
+#
+# For local/Docker use, an optional comma-separated GEMINI_API_KEYS environment
+# variable is also supported. Real keys are never stored in this source file.
 try:
-    GEMINI_API_KEYS = [
-        str(key).strip()
-        for key in st.secrets["GEMINI_API_KEYS"]
-        if str(key).strip()
-    ]
-except (KeyError, FileNotFoundError):
-    GEMINI_API_KEYS = []
+    _secret_keys = list(st.secrets.get("GEMINI_API_KEYS", []))
+except Exception:
+    _secret_keys = []
+
+_env_keys = os.getenv("GEMINI_API_KEYS", "").split(",")
+GEMINI_API_KEYS = [
+    str(key).strip()
+    for key in [*_secret_keys, *_env_keys]
+    if str(key).strip()
+]
 MODEL_NAME = "gemini-3.6-flash"  # model used for OCR and JSON extraction
 CHUNK_SIZE = 20  # fewer OCR requests while retaining a conservative page size
 JSON_CHUNK_CHARS = 70_000  # fewer JSON requests; adjustable from the sidebar
@@ -190,37 +197,44 @@ st.set_page_config(
     page_title="BUET E-Council Document Processor",
     page_icon="📄",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="auto",
 )
 
 st.markdown(
     """
     <style>
         /* ---------------------------------------------------------
-           BUET E-COUNCIL LIGHT THEME
-           Explicit colours are used so Streamlit/Safari dark mode
-           cannot override the application appearance.
+           BUET E-COUNCIL — COMPACT RESPONSIVE LIGHT THEME
            --------------------------------------------------------- */
         :root {
             color-scheme: light !important;
+            --ec-red: #a80714;
+            --ec-red-dark: #820810;
+            --ec-red-soft: #fff3f4;
+            --ec-bg: #f8f5f5;
+            --ec-card: #ffffff;
+            --ec-border: #ead9da;
+            --ec-text: #2f2526;
+            --ec-muted: #746466;
         }
 
         html, body, [data-testid="stAppViewContainer"], .stApp {
-            background: #f8f5f5 !important;
-            color: #2f2526 !important;
+            background: var(--ec-bg) !important;
+            color: var(--ec-text) !important;
         }
 
         [data-testid="stAppViewContainer"] > .main {
             background:
-                radial-gradient(circle at 90% 0%, rgba(168, 7, 20, 0.045), transparent 28rem),
-                #f8f5f5 !important;
+                radial-gradient(circle at 92% 0%, rgba(168, 7, 20, 0.04), transparent 25rem),
+                var(--ec-bg) !important;
         }
 
         [data-testid="stHeader"] {
+            height: 3.25rem !important;
             background: rgba(255, 255, 255, 0.98) !important;
-            border-top: 3px solid #a80714 !important;
-            border-bottom: 1px solid #ead9da !important;
-            box-shadow: 0 2px 12px rgba(69, 18, 23, 0.06) !important;
+            border-top: 3px solid var(--ec-red) !important;
+            border-bottom: 1px solid var(--ec-border) !important;
+            box-shadow: 0 2px 10px rgba(69, 18, 23, 0.05) !important;
         }
 
         [data-testid="stToolbar"],
@@ -230,21 +244,35 @@ st.markdown(
         }
 
         .block-container {
-            max-width: 1240px !important;
-            padding-top: 1.5rem !important;
-            padding-bottom: 3rem !important;
+            width: min(100%, 1160px) !important;
+            max-width: 1160px !important;
+            /* Keep the branded header below Streamlit's fixed top toolbar. */
+            padding: 4.35rem 1.35rem 2rem !important;
         }
 
-        /* Main typography */
+        .main [data-testid="stVerticalBlock"] {
+            gap: 0.72rem !important;
+        }
+
+        /* Compact, readable typography */
         .stApp h1, .stApp h2, .stApp h3,
         .stApp h4, .stApp h5, .stApp h6 {
-            color: #2f2526 !important;
-            letter-spacing: -0.02em;
+            color: var(--ec-text) !important;
+            letter-spacing: -0.025em;
         }
 
-        .stApp p, .stApp span, .stApp label,
-        .stApp li, .stApp small, .stApp div {
-            color: inherit;
+        .stApp h1 {
+            font-size: clamp(1.8rem, 2.5vw, 2.35rem) !important;
+        }
+
+        .stApp h2 {
+            font-size: clamp(1.45rem, 2vw, 1.9rem) !important;
+            margin-top: 0.65rem !important;
+            margin-bottom: 0.2rem !important;
+        }
+
+        .stApp h3 {
+            font-size: clamp(1.15rem, 1.5vw, 1.4rem) !important;
         }
 
         [data-testid="stMarkdownContainer"] p,
@@ -253,87 +281,94 @@ st.markdown(
             color: #67595b !important;
         }
 
+        [data-testid="stCaptionContainer"],
+        .stCaption {
+            font-size: 0.86rem !important;
+            line-height: 1.45 !important;
+        }
+
         /* Branded page header */
         .ec-topbar {
             display: flex;
             align-items: center;
             justify-content: space-between;
-            gap: 1rem;
-            padding: 1.05rem 1.25rem;
-            margin: 0 0 1.25rem 0;
-            background: #ffffff;
-            border: 1px solid #ead9da;
-            border-top: 4px solid #a80714;
-            border-radius: 0 0 14px 14px;
-            box-shadow: 0 8px 24px rgba(74, 20, 25, 0.07);
+            gap: 0.85rem;
+            padding: 0.72rem 0.9rem;
+            margin: 0 0 0.85rem 0;
+            background: var(--ec-card);
+            border: 1px solid var(--ec-border);
+            border-top: 3px solid var(--ec-red);
+            border-radius: 0 0 12px 12px;
+            box-shadow: 0 5px 16px rgba(74, 20, 25, 0.055);
         }
 
         .ec-brand-wrap {
             display: flex;
             align-items: center;
-            gap: 0.9rem;
+            gap: 0.72rem;
+            min-width: 0;
         }
 
         .ec-logo-box {
-            width: 48px;
-            height: 48px;
+            width: 40px;
+            height: 40px;
             display: grid;
             place-items: center;
-            flex: 0 0 48px;
-            border-radius: 12px;
-            background: #a80714;
+            flex: 0 0 40px;
+            border-radius: 10px;
+            background: var(--ec-red);
             color: #ffffff !important;
             font-weight: 800;
-            font-size: 0.76rem;
+            font-size: 0.67rem;
             letter-spacing: 0.04em;
-            box-shadow: 0 6px 14px rgba(168, 7, 20, 0.20);
+            box-shadow: 0 4px 10px rgba(168, 7, 20, 0.18);
         }
 
         .ec-brand-title {
             margin: 0;
-            color: #a80714 !important;
-            font-size: 1.55rem;
-            line-height: 1.1;
+            color: var(--ec-red) !important;
+            font-size: clamp(1.12rem, 1.8vw, 1.38rem);
+            line-height: 1.08;
             font-weight: 800;
-            letter-spacing: 0.015em;
+            letter-spacing: 0.012em;
         }
 
         .ec-brand-subtitle {
-            margin-top: 0.2rem;
-            color: #746466 !important;
-            font-size: 0.92rem;
+            margin-top: 0.13rem;
+            color: var(--ec-muted) !important;
+            font-size: 0.8rem;
         }
 
         .ec-status {
             display: inline-flex;
             align-items: center;
-            gap: 0.45rem;
-            padding: 0.5rem 0.75rem;
-            background: #fdf3f4;
+            gap: 0.4rem;
+            padding: 0.38rem 0.62rem;
+            background: var(--ec-red-soft);
             border: 1px solid #efd1d4;
             border-radius: 999px;
             color: #7f1019 !important;
-            font-size: 0.82rem;
+            font-size: 0.73rem;
             font-weight: 700;
             white-space: nowrap;
         }
 
         .ec-status-dot {
-            width: 8px;
-            height: 8px;
+            width: 7px;
+            height: 7px;
             border-radius: 50%;
             background: #16a06a;
-            box-shadow: 0 0 0 4px rgba(22, 160, 106, 0.12);
+            box-shadow: 0 0 0 3px rgba(22, 160, 106, 0.12);
         }
 
         .app-intro {
-            padding: 1.15rem 1.25rem;
-            margin: 0.5rem 0 1.55rem 0;
-            background: #ffffff;
-            border: 1px solid #ead9da;
-            border-left: 4px solid #a80714;
-            border-radius: 12px;
-            box-shadow: 0 6px 18px rgba(74, 20, 25, 0.045);
+            padding: 0.78rem 0.95rem;
+            margin: 0 0 1rem 0;
+            background: var(--ec-card);
+            border: 1px solid var(--ec-border);
+            border-left: 4px solid var(--ec-red);
+            border-radius: 10px;
+            box-shadow: 0 4px 13px rgba(74, 20, 25, 0.035);
         }
 
         .app-intro strong {
@@ -341,19 +376,58 @@ st.markdown(
         }
 
         .app-intro p {
-            margin: 0.1rem 0 0.25rem 0;
+            margin: 0.05rem 0 0.18rem 0;
+            line-height: 1.4;
         }
 
-        /* Sidebar */
+        /* Custom compact step headings */
+        .ec-section-heading {
+            display: flex;
+            align-items: center;
+            gap: 0.65rem;
+            margin: 1.05rem 0 0.18rem;
+        }
+
+        .ec-section-badge {
+            display: grid;
+            place-items: center;
+            width: 34px;
+            height: 34px;
+            flex: 0 0 34px;
+            border-radius: 9px;
+            background: linear-gradient(180deg, #b51220, #8f0b17);
+            color: #ffffff !important;
+            font-size: 1rem;
+            font-weight: 800;
+            box-shadow: 0 4px 10px rgba(168, 7, 20, 0.17);
+        }
+
+        .ec-section-title {
+            color: var(--ec-text) !important;
+            font-size: clamp(1.45rem, 2.15vw, 1.95rem);
+            line-height: 1.15;
+            font-weight: 800;
+            letter-spacing: -0.03em;
+        }
+
+        .ec-section-copy {
+            margin: 0 0 0.72rem 2.95rem;
+            color: #7d7072 !important;
+            font-size: 0.87rem;
+            line-height: 1.45;
+        }
+
+        /* Sidebar: narrower on desktop, automatic overlay on small screens */
         [data-testid="stSidebar"] {
-            min-width: 320px !important;
-            max-width: 320px !important;
+            min-width: 270px !important;
+            max-width: 270px !important;
             background: #fffafa !important;
-            border-right: 1px solid #ead9da !important;
+            border-right: 1px solid var(--ec-border) !important;
         }
 
         [data-testid="stSidebar"] > div {
             background: #fffafa !important;
+            padding-top: 0.75rem !important;
         }
 
         [data-testid="stSidebar"] * {
@@ -367,32 +441,44 @@ st.markdown(
         }
 
         [data-testid="stSidebar"] hr {
-            border-color: #ead9da !important;
+            border-color: var(--ec-border) !important;
+            margin: 0.8rem 0 !important;
         }
 
-        /* Cards, expanders and bordered containers */
+        [data-testid="stSidebar"] [data-testid="stCaptionContainer"] {
+            font-size: 0.8rem !important;
+        }
+
+        /* Cards, expanders and metrics */
         [data-testid="stExpander"],
         [data-testid="stForm"],
         [data-testid="stMetric"],
         div[data-testid="stVerticalBlockBorderWrapper"] {
-            background: #ffffff !important;
-            border-color: #ead9da !important;
-            border-radius: 12px !important;
-            box-shadow: 0 4px 14px rgba(74, 20, 25, 0.04) !important;
+            background: var(--ec-card) !important;
+            border-color: var(--ec-border) !important;
+            border-radius: 10px !important;
+            box-shadow: 0 3px 10px rgba(74, 20, 25, 0.032) !important;
         }
 
         [data-testid="stExpander"] details,
         [data-testid="stExpander"] summary {
-            background: #ffffff !important;
+            background: var(--ec-card) !important;
             color: #3d3031 !important;
+        }
+
+        [data-testid="stExpander"] summary {
+            padding-top: 0.65rem !important;
+            padding-bottom: 0.65rem !important;
         }
 
         [data-testid="stMetricValue"] {
             color: #8f0b17 !important;
+            font-size: 1.05rem !important;
         }
 
         [data-testid="stMetricLabel"] {
-            color: #746466 !important;
+            color: var(--ec-muted) !important;
+            font-size: 0.78rem !important;
         }
 
         /* Inputs */
@@ -403,7 +489,7 @@ st.markdown(
         [data-baseweb="base-input"],
         [data-testid="stNumberInput"] input {
             background: #ffffff !important;
-            color: #2f2526 !important;
+            color: var(--ec-text) !important;
             border-color: #d9c5c7 !important;
         }
 
@@ -416,23 +502,24 @@ st.markdown(
         [data-baseweb="menu"],
         [role="listbox"] {
             background: #ffffff !important;
-            color: #2f2526 !important;
+            color: var(--ec-text) !important;
         }
 
         [role="option"]:hover {
             background: #fbecee !important;
         }
 
-        /* File uploader */
+        /* File uploader: shorter and better proportioned */
         div[data-testid="stFileUploader"] {
-            padding: 0.35rem 0 !important;
+            padding: 0.15rem 0 !important;
         }
 
         [data-testid="stFileUploaderDropzone"] {
+            min-height: 72px !important;
             background: #ffffff !important;
             border: 1.5px dashed #c98f95 !important;
-            border-radius: 12px !important;
-            padding: 1rem !important;
+            border-radius: 10px !important;
+            padding: 0.65rem 0.8rem !important;
         }
 
         [data-testid="stFileUploaderDropzone"] * {
@@ -443,23 +530,25 @@ st.markdown(
             background: #fff7f7 !important;
             color: #8f0b17 !important;
             border: 1px solid #c98f95 !important;
+            min-height: 36px !important;
         }
 
         [data-testid="stFileUploaderDropzone"] button:hover {
             background: #fbe8ea !important;
-            border-color: #a80714 !important;
+            border-color: var(--ec-red) !important;
         }
 
         /* Buttons */
         [data-testid="stBaseButton-primary"],
         div.stButton > button[kind="primary"],
         div.stDownloadButton > button[kind="primary"] {
-            background: #a80714 !important;
+            min-height: 40px !important;
+            background: var(--ec-red) !important;
             color: #ffffff !important;
-            border: 1px solid #a80714 !important;
-            border-radius: 9px !important;
+            border: 1px solid var(--ec-red) !important;
+            border-radius: 8px !important;
             font-weight: 700 !important;
-            box-shadow: 0 5px 13px rgba(168, 7, 20, 0.18) !important;
+            box-shadow: 0 4px 10px rgba(168, 7, 20, 0.15) !important;
         }
 
         [data-testid="stBaseButton-primary"] *,
@@ -471,17 +560,18 @@ st.markdown(
         [data-testid="stBaseButton-primary"]:hover,
         div.stButton > button[kind="primary"]:hover,
         div.stDownloadButton > button[kind="primary"]:hover {
-            background: #880610 !important;
-            border-color: #880610 !important;
+            background: var(--ec-red-dark) !important;
+            border-color: var(--ec-red-dark) !important;
         }
 
         [data-testid="stBaseButton-secondary"],
         div.stButton > button:not([kind="primary"]),
         div.stDownloadButton > button:not([kind="primary"]) {
+            min-height: 38px !important;
             background: #ffffff !important;
             color: #8f0b17 !important;
             border: 1px solid #d7aeb2 !important;
-            border-radius: 9px !important;
+            border-radius: 8px !important;
             font-weight: 650 !important;
         }
 
@@ -491,58 +581,110 @@ st.markdown(
             color: #8f0b17 !important;
         }
 
-        /* Radio, checkbox, toggle and slider accents */
+        /* Radio, checkbox, slider, progress */
         [data-baseweb="radio"] div[aria-checked="true"],
         [data-baseweb="checkbox"] div[aria-checked="true"],
         [role="checkbox"][aria-checked="true"] {
-            background-color: #a80714 !important;
-            border-color: #a80714 !important;
+            background-color: var(--ec-red) !important;
+            border-color: var(--ec-red) !important;
         }
 
         [data-testid="stSlider"] [role="slider"] {
-            background: #a80714 !important;
-            border-color: #a80714 !important;
+            background: var(--ec-red) !important;
+            border-color: var(--ec-red) !important;
         }
 
-        /* Progress, alerts and code */
         [data-testid="stProgress"] > div > div > div > div {
-            background-color: #a80714 !important;
+            background-color: var(--ec-red) !important;
         }
 
         [data-testid="stAlert"] {
             background: #ffffff !important;
             color: #3d3031 !important;
-            border: 1px solid #ead9da !important;
-            border-left: 4px solid #a80714 !important;
+            border: 1px solid var(--ec-border) !important;
+            border-left: 4px solid var(--ec-red) !important;
         }
 
-        [data-testid="stCode"],
-        pre, code {
+        [data-testid="stCode"], pre, code {
             background: #f8f1f2 !important;
             color: #4b3033 !important;
-            border-color: #ead9da !important;
+            border-color: var(--ec-border) !important;
         }
 
-        /* Divider */
         hr {
             border: 0 !important;
             border-top: 1px solid #e5d4d6 !important;
+            margin: 1.05rem 0 !important;
         }
 
-        /* Responsive behaviour */
-        @media (max-width: 900px) {
+        /* Large desktop */
+        @media (min-width: 1500px) {
             .block-container {
+                max-width: 1240px !important;
+            }
+        }
+
+        /* Laptop / tablet */
+        @media (max-width: 1100px) {
+            [data-testid="stSidebar"] {
+                min-width: 245px !important;
+                max-width: 245px !important;
+            }
+
+            .block-container {
+                width: 100% !important;
+                max-width: 100% !important;
                 padding-left: 1rem !important;
                 padding-right: 1rem !important;
+            }
+        }
+
+        /* Mobile */
+        @media (max-width: 760px) {
+            .block-container {
+                /* Streamlit keeps the toolbar fixed on narrow screens too. */
+                padding: 4.1rem 0.75rem 1.5rem !important;
             }
 
             .ec-topbar {
                 align-items: flex-start;
                 flex-direction: column;
+                padding: 0.65rem 0.75rem;
             }
 
             .ec-status {
-                margin-left: 3.9rem;
+                margin-left: 2.95rem;
+            }
+
+            .app-intro {
+                padding: 0.7rem 0.8rem;
+            }
+
+            .ec-section-heading {
+                gap: 0.52rem;
+                margin-top: 0.85rem;
+            }
+
+            .ec-section-badge {
+                width: 30px;
+                height: 30px;
+                flex-basis: 30px;
+                border-radius: 8px;
+                font-size: 0.9rem;
+            }
+
+            .ec-section-title {
+                font-size: 1.35rem;
+            }
+
+            .ec-section-copy {
+                margin-left: 0;
+                font-size: 0.82rem;
+            }
+
+            [data-testid="stFileUploaderDropzone"] {
+                min-height: 64px !important;
+                padding: 0.55rem !important;
             }
         }
     </style>
@@ -1561,8 +1703,18 @@ def replace_page_text(text: str, page_no: int, new_page_text: str) -> str:
 # ==========================================
 # Main UI
 # ==========================================
-st.header("1️⃣ Extract text from the document")
-st.caption("Upload a PDF and press Run OCR. The app automatically checks every processed page.")
+st.markdown(
+    """
+    <div class="ec-section-heading">
+        <div class="ec-section-badge">1</div>
+        <div class="ec-section-title">Extract text from the document</div>
+    </div>
+    <div class="ec-section-copy">
+        Upload a PDF and press Run OCR. The app automatically checks every processed page.
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 uploaded_pdf = st.file_uploader(
     "Choose a PDF document",
@@ -3295,10 +3447,18 @@ def format_agenda_content_as_html(meeting: dict) -> dict:
 # Stage 2 UI
 # ==========================================
 st.divider()
-st.header("2️⃣ Convert meeting text to JSON")
-st.caption(
-    "Use the OCR result from Step 1, or provide previously extracted text. "
-    "The app validates and combines the meeting information automatically."
+st.markdown(
+    """
+    <div class="ec-section-heading">
+        <div class="ec-section-badge">2</div>
+        <div class="ec-section-title">Convert meeting text to JSON</div>
+    </div>
+    <div class="ec-section-copy">
+        Use the OCR result from Step 1, or provide previously extracted text.
+        The app validates and combines the meeting information automatically.
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
 with st.expander("What the JSON converter does", expanded=False):
