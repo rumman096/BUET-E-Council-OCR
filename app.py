@@ -287,6 +287,14 @@ st.markdown(
             line-height: 1.45 !important;
         }
 
+        /* Ensure plain Streamlit status text stays dark on the light theme. */
+        [data-testid="stText"],
+        [data-testid="stText"] p,
+        [data-testid="stText"] span,
+        [data-testid="stText"] div {
+            color: #2f2526 !important;
+        }
+
         /* Branded page header */
         .ec-topbar {
             display: flex;
@@ -615,6 +623,18 @@ st.markdown(
             border: 0 !important;
             border-top: 1px solid #e5d4d6 !important;
             margin: 1.05rem 0 !important;
+        }
+
+        /* Keep highlighted/selected text readable in Safari and other browsers. */
+        .stApp ::selection {
+            background: #cfe3ff !important;
+            color: #171717 !important;
+            -webkit-text-fill-color: #171717 !important;
+        }
+
+        .stApp ::-moz-selection {
+            background: #cfe3ff !important;
+            color: #171717 !important;
         }
 
         /* Large desktop */
@@ -3668,9 +3688,9 @@ if st.button(json_button_label, type="primary", use_container_width=True):
             ensure_ascii=False,
             indent=4,
         )
-        status.text(
-            f"Done ✅ — {len(final.get('presentees', []))} presentees, "
-            f"{len(final.get('agenda', []))} agenda items."
+        status.markdown(
+            f"**Done ✅ — {len(final.get('presentees', []))} presentees, "
+            f"{len(final.get('agenda', []))} agenda items.**"
         )
 
 if "json_result" in st.session_state:
