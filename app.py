@@ -75,12 +75,11 @@ OCR_ATTEMPTS = 5  # retries per request for transient errors AND incomplete outp
 JSON_ATTEMPTS = 5
 OCR_IMAGE_DPI = 300  # render resolution for image-mode OCR
 PER_PAGE_IMAGE_MB = 1.8  # per-page image size cap; quality/DPI degrade to fit
-
 CHUNK_PROMPT = (
     "You are a highly accurate OCR engine for PRINTED AND HANDWRITTEN Bengali (Bangla) and "
-    "English documents. Extract ALL "
-    "text from every page of this PDF exactly as it appears. Silently analyze EACH PAGE's layout "
-    "independently before deciding its reading order; never output the analysis itself."
+    "English documents. Extract ALL text from every page of this PDF exactly as it appears. "
+    "Silently analyze EACH PAGE's layout independently before deciding its reading order; "
+    "never output the analysis itself."
 
     "\n\nCOMPLETENESS RULES (mandatory):"
 
@@ -190,10 +189,11 @@ CHUNK_PROMPT = (
     "\n\nHANDWRITING & DEGRADED-DOCUMENT RULES:"
 
     "\n17. The document may be entirely HANDWRITTEN, decades old, faded, stained, photocopied, or "
-    "low-contrast. Apply every rule above to handwriting too. Read stroke by stroke; use the "
-    "document's own recurring vocabulary (the same names, departments, offices, and faculties "
-    "appear on multiple lines) to resolve an ambiguous letter — but only to disambiguate what is "
-    "actually written, never to substitute a different word."
+    "low-contrast. Apply every rule above to handwriting too. Read stroke by stroke. Use the "
+    "document's recurring vocabulary ONLY as a tie-breaker between two visually plausible readings. "
+    "Recurring names, departments, offices, faculties, and administrative phrases may help distinguish "
+    "similar-looking letters, but they must NEVER justify replacing a visually supported word with a "
+    "different word that is not supported by the printed or handwritten strokes."
 
     "\n18. Old minutes often abbreviate: প্রফেঃ / প্রফেসর (Professor), সহযোগী প্রফেঃ, ডঃ / ড. / ডীন, "
     "অনুঃ (অনুষদ), পরিঃ (পরিশিষ্ট), স্বাঃ (স্বাক্ষর), ভাইস চ্যান্সেলার. Transcribe every abbreviation "
@@ -207,16 +207,66 @@ CHUNK_PROMPT = (
     "guessing an unrelated word. Use [?] sparingly — most degraded words CAN be read from strokes "
     "plus context. Never invent names, numbers, or dates for illegible text."
 
+    "\n20b. VISUAL FIDELITY OVERRIDES LANGUAGE PRIORS (MANDATORY):"
+
+    "\nThis is a transcription task, NOT a proofreading, spelling-correction, grammar-correction, "
+    "language-correction, rewriting, paraphrasing, or semantic-normalization task."
+
+    "\nNEVER replace a visually read Bengali word with a more common, more grammatical, more idiomatic, "
+    "more official-sounding, or more contextually probable word."
+
+    "\nIf the visible strokes support 'কর্তব্য', output 'কর্তব্য' even if 'কর্তৃত্ব' would form a more "
+    "common administrative phrase."
+
+    "\nIf the image and the surrounding sentence appear to disagree, THE IMAGE IS ALWAYS THE AUTHORITY."
+
+    "\nDo not silently substitute dictionary words, official terminology, familiar administrative "
+    "phrases, standard spellings, expected job titles, or commonly occurring names."
+
+    "\nEvery output character must be justified by visible printed or handwritten strokes."
+
+    "\n20c. UNCERTAINTY HANDLING (MANDATORY):"
+
+    "\nWhen one or more characters are visually uncertain, preserve the closest visible reading rather "
+    "than replacing the entire word with another plausible word."
+
+    "\nIf only part of a word is unreadable, replace ONLY the unreadable part with [?] whenever the "
+    "remaining characters are visually clear."
+
+    "\nExamples:"
+
+    "\nVisible reading: কর্ত?্য"
+    "\nOutput: কর্ত[?]্য"
+
+    "\nVisible reading: যন্ত্রক?শল"
+    "\nOutput: যন্ত্রক[?]শল"
+
+    "\nNever change an uncertain word into a different dictionary word merely because that alternative "
+    "is statistically more common or fits the sentence better."
+
+    "\nPrefer faithful uncertainty over confident guessing."
+
+    "\n20d. NO SEMANTIC AUTOCORRECTION:"
+
+    "\nDo not repair spelling, grammar, historical orthography, archaic wording, punctuation, or word "
+    "choice. Preserve nonstandard, obsolete, inconsistent, or apparently incorrect forms exactly as "
+    "they appear."
+
+    "\nDo not change a word because another word would make the sentence more logical."
+
+    "\nDo not harmonize repeated terms across pages. The same office, name, or designation may be "
+    "spelled differently in different places; preserve each occurrence independently."
+
     "\n21. PRINTED documents often carry HANDWRITTEN additions: dates written beside signatures, "
     "reference numbers, corrections, or marginal notes. Transcribe these too, at their position — "
     "a handwritten date under or next to a signature belongs with that signature block. Do not "
     "transcribe the signature strokes themselves."
 
     "\n\nOUTPUT FORMAT: Only the extracted text in Markdown. Do not add commentary, explanations, "
-    "layout labels such as 'left column' or 'right column', translations, or notes. Output every "
+    "layout labels such as 'left column' or 'right column', translations, confidence scores, "
+    "interpretive notes, correction notes, alternative readings, or summaries. Output every "
     "page exactly once and stop immediately after the final page's transcription."
 )
-
 def chunk_prompt_for(input_mode: str, expected_pages: int) -> str:
     """Return the OCR prompt adapted to the request payload type."""
     if input_mode == "pdf":
