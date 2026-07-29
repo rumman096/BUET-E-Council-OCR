@@ -177,6 +177,22 @@ CHUNK_PROMPT = (
     "\n14. Keep Bengali numerals (০১২৩৪৫৬৭৮৯) exactly as printed; do not convert them to 0-9 or vice "
     "versa. Copy dates, reference numbers (স্মারক নং), and serial numbers digit-for-digit."
 
+    "\n14b. DIGIT FIDELITY — digits are the least recoverable text on the page. A misread LETTER "
+    "usually produces a word that looks wrong, so it can be spotted; a misread DIGIT produces a date "
+    "or number that looks perfectly normal and can never be caught by any later check. Digits "
+    "therefore get no benefit of the doubt and no help from context. Read every digit from its OWN "
+    "strokes. NEVER infer a digit from another date on the page, from the meeting's own date, from a "
+    "neighbouring item's number, from an expected sequence, or from what would be a plausible day, "
+    "month or year. In HANDWRITING these Bengali digit pairs are routinely confused and must be "
+    "re-read individually before you commit to one: ৩ vs ৬, ১ vs ৭, ২ vs ৩, ৪ vs ৮, ৫ vs ৬, ৬ vs ৯, "
+    "৭ vs ৯, ০ vs ৩. For each of them follow the pen: where the stroke starts, whether it closes "
+    "into a loop, and which way the tail turns. In a date such as ১৮-৩-৭৪ transcribe the day, month "
+    "and year fields INDEPENDENTLY; never harmonize one field with a date written elsewhere in the "
+    "document. If a digit is still genuinely ambiguous after reading its strokes, write [?] for THAT "
+    "SINGLE DIGIT and keep the rest of the number (১৮-[?]-৭৪). A guessed digit is invisible to every "
+    "downstream check; a [?] is visible and gets verified by a human. Never guess a digit merely to "
+    "make a date or number look complete."
+
     "\n15. Preserve honorifics and abbreviations exactly as printed: অধ্যাপক, ডঃ, ড., জনাব, মোঃ, মোছাঃ. "
     "Keep the danda '।' where printed; never replace it with '.'. NEVER expand a printed "
     "abbreviation to its full form, even when you are 100% certain what it stands for: "
@@ -773,6 +789,114 @@ st.markdown(
                 padding: 0.55rem !important;
             }
         }
+
+        /* ===========================================================
+           THEME-PROOF READABILITY  (single-file: no config.toml needed)
+           Streamlit paints widget labels, alert bodies, code tokens and
+           expander contents from ITS OWN theme. If that theme resolves to
+           dark — system preference, browser setting or host default — they
+           render white-on-white against this light app. Rather than chase
+           each element, force readable ink on everything first, then
+           restore the few places that are meant to be light or coloured.
+           ORDER MATTERS: the catch-all must come before the exceptions.
+           =========================================================== */
+
+        /* 1. Catch-all ink. `color` only — NOT -webkit-text-fill-color,
+              which would also flatten colour emoji into dark silhouettes. */
+        .stApp, .stApp *, [data-testid="stSidebar"] * {
+            color: #2f2526 !important;
+        }
+
+        /* 2. Light surfaces, so forced-dark ink never lands on a dark box. */
+        [data-testid="stJson"], [data-testid="stAlert"],
+        [data-testid="stAlertContainer"], [data-testid="stNotification"],
+        [data-testid="stExpander"], [data-testid="stExpanderDetails"],
+        [data-testid="stDataFrame"], [data-testid="stTable"],
+        [data-baseweb="popover"], [data-baseweb="menu"], [role="listbox"] {
+            background-color: #ffffff !important;
+        }
+        [data-testid="stCode"], pre, code {
+            background-color: #f8f1f2 !important;
+        }
+
+        /* 3. Form controls need the fill colour too (Safari / autofill). */
+        input, textarea,
+        [data-testid="stNumberInput"] input,
+        [data-testid="stTextArea"] textarea,
+        [data-baseweb="base-input"] input {
+            color: #2f2526 !important;
+            -webkit-text-fill-color: #2f2526 !important;
+            background-color: #ffffff !important;
+        }
+        input::placeholder, textarea::placeholder {
+            color: #9b8a8c !important;
+            -webkit-text-fill-color: #9b8a8c !important;
+        }
+
+        /* 4. EXCEPTIONS — everything that is meant to be light or coloured. */
+        .ec-logo-box, .ec-logo-box *,
+        .ec-section-badge, .ec-section-badge * {
+            color: #ffffff !important;
+        }
+        .ec-brand-title { color: var(--ec-red) !important; }
+        .ec-brand-subtitle { color: var(--ec-muted) !important; }
+        .ec-status, .ec-status * { color: #7f1019 !important; }
+        .app-intro strong { color: #7f1019 !important; }
+        .ec-section-copy { color: #7d7072 !important; }
+        [data-testid="stMetricValue"] { color: #8f0b17 !important; }
+        [data-testid="stMetricLabel"] { color: var(--ec-muted) !important; }
+        [data-testid="stSidebar"] h1,
+        [data-testid="stSidebar"] h2,
+        [data-testid="stSidebar"] h3 { color: #8f0b17 !important; }
+        [data-testid="stCaptionContainer"],
+        [data-testid="stCaptionContainer"] *,
+        .stCaption { color: #67595b !important; }
+
+        [data-testid="stBaseButton-primary"],
+        [data-testid="stBaseButton-primary"] *,
+        div.stButton > button[kind="primary"],
+        div.stButton > button[kind="primary"] *,
+        div.stDownloadButton > button[kind="primary"],
+        div.stDownloadButton > button[kind="primary"] * {
+            color: #ffffff !important;
+        }
+        [data-testid="stBaseButton-secondary"],
+        [data-testid="stBaseButton-secondary"] *,
+        div.stButton > button:not([kind="primary"]),
+        div.stButton > button:not([kind="primary"]) *,
+        div.stDownloadButton > button:not([kind="primary"]),
+        div.stDownloadButton > button:not([kind="primary"]) * {
+            color: #8f0b17 !important;
+        }
+        .stApp a, .stApp a * {
+            color: #8f0b17 !important;
+            text-decoration: underline;
+        }
+        [data-baseweb="tooltip"], [data-baseweb="tooltip"] * {
+            background: #2f2526 !important;
+            color: #ffffff !important;
+        }
+
+        /* 5. A disabled button must still read as disabled, not invisible. */
+        button:disabled, button:disabled * {
+            color: #9b8a8c !important;
+            background: #f4eded !important;
+            border-color: #e5d4d6 !important;
+            cursor: not-allowed !important;
+        }
+
+        /* A plain, friendly help box */
+        .ec-help {
+            padding: 0.7rem 0.9rem;
+            margin: 0.4rem 0 0.8rem 0;
+            background: #fffdfd;
+            border: 1px solid var(--ec-border);
+            border-left: 4px solid #16a06a;
+            border-radius: 10px;
+            color: #3d3031 !important;
+            font-size: 0.88rem;
+            line-height: 1.5;
+        }
     </style>
     """,
     unsafe_allow_html=True,
@@ -795,8 +919,11 @@ st.markdown(
     </div>
 
     <div class="app-intro">
-        <p><strong>Convert meeting documents in two simple steps.</strong></p>
-        <p>Extract document text first, then convert it into structured meeting JSON.</p>
+        <p><strong>Turn a scanned meeting document into text and a structured record.</strong></p>
+        <p><b>Step 1</b> — upload your PDF and press <b>Read the document</b>.
+           <b>Step 2</b> — press <b>Create the meeting record</b> to turn that text into JSON.</p>
+        <p>Everything is already set up. The only thing you need to choose is what kind
+           of document you have, in the panel on the left.</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -806,12 +933,28 @@ with st.sidebar:
     st.header("📄 Document options")
     st.caption("Gemini access is already configured by the administrator.")
 
-    degraded_scan = st.checkbox(
-        "My document is old, faded, or handwritten",
-        value=False,
-        help="Enables stronger image cleanup for difficult scans. Leave this off for normal documents.",
+    document_kind = st.radio(
+        "What kind of document is this?",
+        [
+            "Modern printed document",
+            "Old, faded or handwritten document",
+        ],
+        help=(
+            "This single choice sets everything else for you: how much the page "
+            "images are cleaned up, and how many pages are read at a time."
+        ),
     )
-    preprocess_profile = "degraded" if degraded_scan else "standard"
+    is_old_document = document_kind.startswith("Old")
+    degraded_scan = is_old_document  # kept for the processing-details panel
+    preprocess_profile = "degraded" if is_old_document else "standard"
+    recommended_pages_per_batch = 1 if is_old_document else 4
+
+    st.caption(
+        "Reading **one page at a time** with extra image cleanup. Slower, but the "
+        "most accurate setting for difficult handwriting."
+        if is_old_document
+        else "Reading **4 pages at a time**. A good balance of speed and accuracy."
+    )
 
     st.divider()
     st.caption("The recommended settings work well for most documents.")
@@ -847,12 +990,17 @@ with st.sidebar:
             help="Higher DPI can improve small or faded text but increases cost and payload size.",
         )
         chunk_size = st.slider(
-            "Pages per OCR request",
+            "Pages read at a time",
             min_value=1,
             max_value=40,
-            value=CHUNK_SIZE,
+            value=recommended_pages_per_batch,
             step=1,
-            help="Smaller values can improve accuracy on difficult pages; larger values reduce request count.",
+            key=f"pages_per_batch_{preprocess_profile}",
+            help=(
+                "Fewer pages at a time is more accurate, because the model sees less "
+                "at once and cannot copy details between pages. More pages is faster "
+                "and cheaper. Changing the document type above resets this."
+            ),
         )
         use_text_layer = st.checkbox(
             "Use embedded PDF text when available",
@@ -2027,10 +2175,10 @@ if uploaded_pdf is not None:
         and not st.session_state.get("job_complete", False)
     )
 
-    button_label = "🔁 Resume OCR" if resuming else "🚀 Run OCR"
+    button_label = "🔁 Continue reading" if resuming else "🚀 Read the document"
     if st.button(button_label, type="primary", use_container_width=True):
         if not api_key:
-            st.error("No Gemini API key is configured. Add at least one key to GEMINI_API_KEYS near the top of the code.")
+            st.error("The reading service is not set up yet. Please ask the administrator to add a Gemini API key, then try again.")
             st.stop()
 
         with st.spinner("Splitting PDF into chunks..."):
@@ -2049,7 +2197,7 @@ if uploaded_pdf is not None:
             else "raw PDF chunks"
         )
         st.success(
-            f"Ready to process {total_pages} page(s) in {total_chunks} batch(es)."
+            f"Ready — {total_pages} page(s) will be read in {total_chunks} batch(es)."
         )
         if input_mode == "images":
             # The scan's own resolution is the hard ceiling on OCR accuracy;
@@ -2071,7 +2219,7 @@ if uploaded_pdf is not None:
                     "scan's own resolution cannot be recovered by a higher setting — "
                     "if names are still misread, the source scan is the limit."
                 )
-        with st.expander("View processing details", expanded=False):
+        with st.expander("Technical details (optional)", expanded=False):
             st.markdown(
                 f"""
                 **Input method:** {mode_desc}  
@@ -2267,19 +2415,24 @@ if uploaded_pdf is not None:
         consistency_issues = ocr_consistency_report(combined)
         if consistency_issues:
             st.warning(
-                "Attendee-list consistency check found "
-                f"{len(consistency_issues)} possible mis-copied line(s):\n\n- "
-                + "\n- ".join(consistency_issues)
+                f"⚠️ {len(consistency_issues)} attendee line(s) look like they may have "
+                "been copied from a neighbouring entry. Worth a quick check."
             )
+            with st.expander("Show the lines to check", expanded=False):
+                st.markdown("- " + "\n- ".join(consistency_issues))
 
         # Page-boundary audit: catches an item number lost in a damaged margin
         # followed by silent renumbering of the rest of the list.
         boundary_issues = page_boundary_item_report(combined)
         if boundary_issues:
             st.warning(
-                "Page-boundary check — possible lost item number(s):\n\n- "
-                + "\n- ".join(issue["message"] for issue in boundary_issues)
+                f"⚠️ {len(boundary_issues)} page(s) may have lost an item number at the "
+                "page edge. The app re-reads those pages on their own to check."
             )
+            with st.expander("Show the pages to check", expanded=False):
+                st.markdown(
+                    "- " + "\n- ".join(issue["message"] for issue in boundary_issues)
+                )
 
             # AUTO CROSS-CHECK: renumbering happens because the model remembers
             # the previous page's last item number ("after ৭ comes ৮") and that
@@ -3959,9 +4112,24 @@ if current_json_source.strip():
         and not st.session_state.get("json_job_complete", False)
     )
 
-json_button_label = "🔁 Resume Meeting JSON" if json_resuming else "🧠 Extract Meeting JSON"
+json_button_label = (
+    "🔁 Continue building the record" if json_resuming
+    else "🧠 Create the meeting record"
+)
 
-if st.button(json_button_label, type="primary", use_container_width=True):
+_step_two_ready = bool(current_json_source.strip())
+if not _step_two_ready:
+    st.markdown(
+        "<div class='ec-help'>Step 2 unlocks once Step 1 has produced text. Read a document above, or switch the source to <b>Upload or paste extracted text</b> and provide your own.</div>",
+        unsafe_allow_html=True,
+    )
+
+if st.button(
+    json_button_label,
+    type="primary",
+    use_container_width=True,
+    disabled=not _step_two_ready,
+):
     # Deterministic Bengali cleanup also protects manually pasted text.
     full_text = clean_bengali_ocr_text(current_json_source)
 
@@ -3969,7 +4137,7 @@ if st.button(json_button_label, type="primary", use_container_width=True):
         st.error("No text to process. Run OCR first or paste text.")
         st.stop()
     if not api_key:
-        st.error("No Gemini API key is configured. Add at least one key to GEMINI_API_KEYS near the top of the code.")
+        st.error("The reading service is not set up yet. Please ask the administrator to add a Gemini API key, then try again.")
         st.stop()
     if "[OCR FAILED FOR PAGES" in full_text:
         st.warning(
@@ -3996,7 +4164,7 @@ if st.button(json_button_label, type="primary", use_container_width=True):
     st.info(
         f"Preparing {total} text batch(es). {len(pending_items)} batch(es) still need processing."
     )
-    with st.expander("View JSON processing details", expanded=False):
+    with st.expander("Technical details (optional)", expanded=False):
         st.markdown(
             f"""
             **Validated batches already saved:** {len(partials_done)}  
@@ -4079,9 +4247,11 @@ if st.button(json_button_label, type="primary", use_container_width=True):
         issues = meeting_quality_report(final)
         if issues:
             st.warning(
-                "Quality report — verify these against the source PDF:\n\n- "
-                + "\n- ".join(issues)
+                f"⚠️ {len(issues)} thing(s) to verify against the original document "
+                "before you use this record."
             )
+            with st.expander("Show what to verify", expanded=False):
+                st.markdown("- " + "\n- ".join(issues))
         else:
             st.success("Quality report passed ✅ — all key fields present and consistent.")
 
