@@ -262,6 +262,19 @@ CHUNK_PROMPT = (
     "a handwritten date under or next to a signature belongs with that signature block. Do not "
     "transcribe the signature strokes themselves."
 
+    "\n21b. SIGNATURE AND APPROVAL BLOCKS — the highest-risk block on the page. The closing block "
+    "of the minutes (a name in parentheses, then a designation such as রেজিস্ট্রার (অঃ দাঃ), then ও, "
+    "then একাডেমিক কাউন্সিলের সচিব) looks like boilerplate you have seen many times, and THAT IS THE "
+    "TRAP: the designation lines are fixed, but the NAME inside the parentheses changes with every "
+    "document and every year. Never complete this block from memory, from a similar document, or "
+    "from what such a block usually contains. Read the name inside the parentheses letter by letter "
+    "from THIS image. An unfamiliar or uncommon name here is EXPECTED — transcribe exactly what is "
+    "printed instead of substituting a more common Bengali name; writing 'ফোয়াদ খান' where the page "
+    "prints 'ফোরকান উদ্দিন' is a total failure, not a small error. The handwritten signature above "
+    "the name may spell the same person in Latin letters — it must not influence the printed "
+    "Bengali either. Finally, transcribe EVERY line of the block, including the last line after ও: "
+    "never stop early because the remaining lines seem predictable."
+
     "\n22. OLD TYPEWRITTEN ENGLISH pages (1960s EPUET minutes) are struck on a manual "
     "typewriter: letters sit unevenly, overtyped corrections and hand-inked marks are common, "
     "and a carbon copy may be faint. Read strictly in printed top-to-bottom order and "
@@ -1155,14 +1168,20 @@ class APIKeyPool:
     request and model errors are never hidden by switching keys.
     """
 
-    def __init__(self, keys: list, requests_per_minute: int):
+    def __init__(self, keys: list, requests_per_minute: int, unavailable=None):
         self.keys = list(dict.fromkeys(k for k in keys if k))
         if not self.keys:
             raise ValueError("At least one Gemini API key is required.")
         self._lock = threading.Lock()
         self._active_index = 0
         self._quota_failures = {key: 0 for key in self.keys}
-        self._unavailable = set()
+        # Keys already known to be out of quota (carried over from an earlier
+        # run in this session) start retired, so a resume does not waste
+        # attempts rediscovering them. Never start with every key retired.
+        restored = {key for key in (unavailable or ()) if key in self.keys}
+        if len(restored) >= len(self.keys):
+            restored = set()
+        self._unavailable = restored
         self._limiters = {
             key: RequestStartLimiter(requests_per_minute) for key in self.keys
         }
@@ -1198,9 +1217,12 @@ class APIKeyPool:
         with self._lock:
             if quota_error:
                 self._quota_failures[key] = self._quota_failures.get(key, 0) + 1
-                # First 429 may be a momentary RPM/TPM spike. Respect normal
-                # backoff once before taking a whole key out of this run.
-                if self._quota_failures[key] < 2:
+                # With several keys configured, a 429 means "move on NOW":
+                # retrying the same exhausted key only burns this chunk's
+                # attempt budget and delays reaching a healthy key. With a
+                # single key there is nowhere to go, so absorb the first 429
+                # and let ordinary backoff handle it.
+                if len(self.keys) == 1 and self._quota_failures[key] < 2:
                     return False
 
             replacement = self._next_available_locked(
@@ -1216,6 +1238,11 @@ class APIKeyPool:
                 self._active_index = replacement
             return True
 
+    def exhausted_keys(self) -> list:
+        """Keys retired during this run, for carrying over to a resume."""
+        with self._lock:
+            return sorted(self._unavailable)
+
     def _next_available_locked(self, start_index: int, exclude=None):
         excluded = set(exclude or ()) | self._unavailable
         for offset in range(1, len(self.keys) + 1):
@@ -1227,6 +1254,30 @@ class APIKeyPool:
     @property
     def count(self) -> int:
         return len(self.keys)
+
+
+# A key that hit its quota is skipped for the next EXHAUSTED_KEY_TTL seconds,
+# then tried again — quota windows roll over, so retiring one forever would
+# slowly starve the pool.
+EXHAUSTED_KEY_TTL = 600
+
+
+def remembered_exhausted_keys() -> list:
+    """Keys that hit their quota recently, so a resume can skip them."""
+    record = st.session_state.get("exhausted_keys") or {}
+    now = time.time()
+    return [key for key, when in record.items() if now - when < EXHAUSTED_KEY_TTL]
+
+
+def remember_exhausted_keys(pool: "APIKeyPool") -> None:
+    """Carry this run's exhausted keys into the next one."""
+    record = dict(st.session_state.get("exhausted_keys") or {})
+    now = time.time()
+    for key in pool.exhausted_keys():
+        record[key] = now
+    st.session_state["exhausted_keys"] = {
+        key: when for key, when in record.items() if now - when < EXHAUSTED_KEY_TTL
+    }
 
 
 def _page_image_coverage(page) -> float:
@@ -1771,7 +1822,8 @@ def ocr_chunk_with_gemini(
 
     last_error = None
 
-    for attempt in range(OCR_ATTEMPTS):
+    attempt = 0
+    while attempt < OCR_ATTEMPTS:
         api_key = key_pool.current_key()
         key_pool.wait(api_key)
         try:
@@ -1811,17 +1863,23 @@ def ocr_chunk_with_gemini(
 
         except OCRIncompleteError as e:
             last_error = e
-            if attempt < OCR_ATTEMPTS - 1:
-                time.sleep(retry_delay(e, attempt))
+            attempt += 1
+            if attempt < OCR_ATTEMPTS:
+                time.sleep(retry_delay(e, attempt - 1))
         except Exception as e:
             last_error = e
-            switched = key_pool.report_error(api_key, e)
-            if switched and attempt < OCR_ATTEMPTS - 1:
+            # A key swap is NOT a retry. Moving to a fresh key costs nothing,
+            # so it must not consume the attempt budget — otherwise a run of
+            # exhausted keys is never traversed. Bounded by the key count:
+            # the last surviving key is never retired, and failures on it
+            # fall through to ordinary backoff below.
+            if key_pool.report_error(api_key, e):
                 continue
             if _is_fatal_api_error(e):
                 raise
-            if attempt < OCR_ATTEMPTS - 1:
-                time.sleep(retry_delay(e, attempt))
+            attempt += 1
+            if attempt < OCR_ATTEMPTS:
+                time.sleep(retry_delay(e, attempt - 1))
 
     raise last_error
 
@@ -2328,7 +2386,13 @@ if uploaded_pdf is not None:
         status = st.empty()
         failed_chunks = []
 
-        key_pool = APIKeyPool(api_keys, int(safe_rpm))
+        _skip_keys = remembered_exhausted_keys()
+        key_pool = APIKeyPool(api_keys, int(safe_rpm), unavailable=_skip_keys)
+        if _skip_keys and len(_skip_keys) < len(api_keys):
+            st.caption(
+                f"Skipping {len(_skip_keys)} key(s) that ran out of quota in the "
+                "last 10 minutes — they will be tried again after that."
+            )
         pending = [
             (idx, start, end, chunk_bytes)
             for idx, (start, end, chunk_bytes) in enumerate(chunks)
@@ -2495,6 +2559,7 @@ if uploaded_pdf is not None:
                             f"({repair_error}) — verify that page manually."
                         )
 
+        remember_exhausted_keys(key_pool)
         st.session_state["ocr_result"] = combined
         st.session_state["ocr_filename"] = uploaded_pdf.name.rsplit(".", 1)[0]
 
@@ -3359,7 +3424,8 @@ def gemini_extract_meeting(
     )
     last_error = None
 
-    for attempt in range(JSON_ATTEMPTS):
+    attempt = 0
+    while attempt < JSON_ATTEMPTS:
         api_key = key_pool.current_key()
         key_pool.wait(api_key)
         try:
@@ -3398,8 +3464,9 @@ def gemini_extract_meeting(
             # Invalid or truncated JSON → retry; lower the JSON-chunk slider
             # if a chunk keeps failing this way.
             last_error = e
-            if attempt < JSON_ATTEMPTS - 1:
-                time.sleep(retry_delay(e, attempt))
+            attempt += 1
+            if attempt < JSON_ATTEMPTS:
+                time.sleep(retry_delay(e, attempt - 1))
         except Exception as e:
             last_error = e
             msg = str(e).upper()
@@ -3407,13 +3474,14 @@ def gemini_extract_meeting(
                 raise RuntimeError(
                     f"response_schema not supported by {model_name}: {e}"
                 ) from e
-            switched = key_pool.report_error(api_key, e)
-            if switched and attempt < JSON_ATTEMPTS - 1:
+            # A key swap is not a retry — see the OCR loop.
+            if key_pool.report_error(api_key, e):
                 continue
             if _is_fatal_api_error(e):
                 raise
-            if attempt < JSON_ATTEMPTS - 1:
-                time.sleep(retry_delay(e, attempt))
+            attempt += 1
+            if attempt < JSON_ATTEMPTS:
+                time.sleep(retry_delay(e, attempt - 1))
 
     raise last_error
 
@@ -4192,7 +4260,9 @@ if st.button(
     progress = st.progress(len(partials_done) / total)
     status = st.empty()
     failed = []
-    key_pool = APIKeyPool(api_keys, int(safe_rpm))
+    key_pool = APIKeyPool(
+        api_keys, int(safe_rpm), unavailable=remembered_exhausted_keys()
+    )
 
     def run_json(item):
         i, chunk = item
@@ -4229,6 +4299,8 @@ if st.button(
                     f"Finished {completed_this_run}/{len(pending_items)} requests in this run; "
                     f"cached {len(partials_done)}/{total} validated JSON chunks..."
                 )
+
+    remember_exhausted_keys(key_pool)
 
     if not partials_done:
         st.error("All chunks failed — nothing to merge.")
