@@ -75,6 +75,11 @@ OCR_ATTEMPTS = 5  # retries per request for transient errors AND incomplete outp
 JSON_ATTEMPTS = 5
 OCR_IMAGE_DPI = 300  # render resolution for image-mode OCR
 PER_PAGE_IMAGE_MB = 1.8  # per-page image size cap; quality/DPI degrade to fit
+# A page this covered by raster images is a photograph of paper, not a
+# digitally created page — any text it reports came from a legacy OCR pass.
+SCANNED_PAGE_IMAGE_COVERAGE = 0.60
+# Stray-symbol ceiling for a text layer we are willing to trust.
+TEXT_LAYER_MAX_SYMBOL_NOISE = 0.02
 
 CHUNK_PROMPT = (
     "You are a highly accurate OCR engine for PRINTED AND HANDWRITTEN Bengali (Bangla) and "
@@ -211,6 +216,14 @@ CHUNK_PROMPT = (
     "reference numbers, corrections, or marginal notes. Transcribe these too, at their position — "
     "a handwritten date under or next to a signature belongs with that signature block. Do not "
     "transcribe the signature strokes themselves."
+
+    "\n22. OLD TYPEWRITTEN ENGLISH pages (1960s EPUET minutes) are struck on a manual "
+    "typewriter: letters sit unevenly, overtyped corrections and hand-inked marks are common, "
+    "and a carbon copy may be faint. Read strictly in printed top-to-bottom order and "
+    "transcribe what the typist intended (e.g. 'Vice-Chancellor', not a mis-struck lookalike), "
+    "keeping numbered member lists in their printed order with their printed numbers. If the "
+    "file also contains an invisible or scrambled machine-text layer, IGNORE it completely — "
+    "only the visible page image is authoritative."
 
     "\n\nOUTPUT FORMAT: Only the extracted text in Markdown. Do not add commentary, explanations, "
     "layout labels such as 'left column' or 'right column', translations, or notes. Output every "
@@ -829,7 +842,7 @@ with st.sidebar:
         use_text_layer = st.checkbox(
             "Use embedded PDF text when available",
             value=True,
-            help="Digital PDF pages can be extracted locally at no API cost. Scanned pages still use Gemini.",
+            help="Only genuinely digital pages are extracted locally (free). Scanned pages — including scans that hide a legacy OCR layer — always go to Gemini.",
         )
         json_chunk_chars = st.slider(
             "Characters per JSON request",
@@ -1039,21 +1052,146 @@ class APIKeyPool:
         return len(self.keys)
 
 
-def extract_text_layer_pages(pdf_bytes: bytes) -> dict:
-    """Return {0-based page index: text} for pages with a usable embedded
-    text layer.
+def _page_image_coverage(page) -> float:
+    """Fraction of the page area covered by raster images (0.0-1.0).
 
-    Digitally created PDFs already contain their text — extracting it locally
-    is FREE and character-perfect, so those pages never need a Gemini request.
-    Scanned pages return little or no text and are excluded. Conservative
-    thresholds avoid trusting garbage layers (e.g. legacy-encoded Bengali):
-    a page needs substantial text AND real Bengali or Latin content.
+    A digitally created PDF draws its page from text objects and covers little
+    or none of it with images. A SCANNED page is one full-page photograph, so
+    whatever text it reports came from a legacy OCR pass baked into the file —
+    not from the document itself — and must never be trusted.
+    """
+    try:
+        page_area = float(page.rect.width) * float(page.rect.height)
+    except Exception:
+        return 0.0
+    if page_area <= 0:
+        return 0.0
+
+    boxes = []
+    try:
+        for info in page.get_image_info():
+            bbox = info.get("bbox")
+            if bbox:
+                boxes.append(bbox)
+    except Exception:
+        boxes = []
+    if not boxes:
+        # Older PyMuPDF builds: image blocks carry type 1 in the raw dict.
+        try:
+            for block in (page.get_text("rawdict") or {}).get("blocks", []):
+                if block.get("type") == 1 and block.get("bbox"):
+                    boxes.append(block["bbox"])
+        except Exception:
+            return 0.0
+
+    covered = 0.0
+    for box in boxes:
+        try:
+            x0, y0, x1, y1 = box
+        except Exception:
+            continue
+        covered += abs((x1 - x0) * (y1 - y0))
+    return min(covered / page_area, 1.0)
+
+
+def _page_text_is_invisible(page) -> bool:
+    """True when most of a page's text is drawn in invisible render mode.
+
+    Tesseract/ABBYY hide their OCR layer behind the scanned image using text
+    render mode 3. Real document text is never invisible, so this is a
+    definitive "this is a scan, not a digital PDF" signal.
+    """
+    try:
+        spans = page.get_texttrace()
+    except Exception:
+        return False
+    invisible = visible = 0
+    for span in spans or ():
+        if not isinstance(span, dict):
+            continue
+        count = len(span.get("chars") or ()) or 1
+        if span.get("type") == 3:
+            invisible += count
+        else:
+            visible += count
+    return invisible > 0 and invisible >= visible
+
+
+_ORDINARY_PUNCTUATION = set(
+    ".,;:!?()[]{}<>/-+=&%@#$*_|"
+    + "'"
+    + '"'
+    + "\\"
+    + "\u2013\u2014\u2018\u2019\u201c\u201d\u2026\u00b0\u00a3\u09f3\u0964\u0965"
+)
+
+
+def _symbol_noise_ratio(text: str) -> float:
+    """Fraction of characters that are neither letters/digits/marks nor
+    ordinary punctuation.
+
+    A clean text layer sits far below 1%. A scrambled scan layer is littered
+    with stray glyphs (^ | ■ • » « ***) and measures several percent.
+    """
+    non_space = [ch for ch in (text or "") if not ch.isspace()]
+    if not non_space:
+        return 1.0
+    junk = 0
+    for ch in non_space:
+        if ch.isalnum() or ch in _ORDINARY_PUNCTUATION:
+            continue
+        if "\u0980" <= ch <= "\u09ff":          # Bengali block, incl. matras
+            continue
+        if unicodedata.category(ch).startswith("M"):   # combining marks
+            continue
+        junk += 1
+    return junk / len(non_space)
+
+
+def extract_text_layer_pages(pdf_bytes: bytes):
+    """Return (usable_pages, rejected_pages) for the FREE local text path.
+
+    usable_pages   {0-based page index: text} — pages whose embedded text is
+                   genuine document text (a digitally created PDF). Extracting
+                   these locally is free and character-perfect.
+    rejected_pages {0-based page index: reason} — pages that DO carry text but
+                   whose text cannot be trusted, so Gemini must read them.
+
+    WHY THE REJECT LIST EXISTS: a scanned document often ships with a hidden
+    legacy OCR layer. That layer is typically scrambled — wrong reading order,
+    invented words, stray symbols — and silently preferring it produces a
+    confidently wrong transcription at zero cost, which is far worse than
+    paying for a correct one. Three independent guards catch it:
+
+      1. the page is essentially a full-page image (a scan),
+      2. the text is drawn invisibly (an OCR layer hiding behind that scan),
+      3. the text fails the mojibake / stray-symbol quality checks.
+
+    Guards 1 and 2 are decisive on their own; a real digital page has neither.
     """
     pages = {}
+    rejected = {}
     src = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:
         for index, page in enumerate(src):
             text = (page.get_text("text") or "").strip()
+
+            coverage = _page_image_coverage(page)
+            if coverage >= SCANNED_PAGE_IMAGE_COVERAGE:
+                if len(text) >= 40:
+                    rejected[index] = (
+                        f"the page is a scanned image ({coverage:.0%} of the "
+                        "page area) carrying a legacy OCR text layer"
+                    )
+                continue
+
+            if _page_text_is_invisible(page):
+                if len(text) >= 40:
+                    rejected[index] = (
+                        "the text is invisible OCR text hidden behind a scan"
+                    )
+                continue
+
             if len(text) < 120:
                 continue
             bengali_chars = sum(1 for ch in text if "\u0980" <= ch <= "\u09ff")
@@ -1063,9 +1201,7 @@ def extract_text_layer_pages(pdf_bytes: bytes) -> dict:
             # Garbage-layer guard: scans sometimes carry a legacy OCR layer of
             # mojibake (Bengali stored as Latin gibberish full of symbols, e.g.
             # "^IdJTGF (5S PITS"). Real text is overwhelmingly letters/digits
-            # (~0.95+ of non-space chars, counting the whole Bengali block);
-            # mojibake measures ~0.70–0.79 — reject anything below 0.88 and
-            # let Gemini OCR those pages instead.
+            # (~0.95+ of non-space chars, counting the whole Bengali block).
             non_space = sum(1 for ch in text if not ch.isspace())
             good_chars = sum(
                 1
@@ -1073,12 +1209,10 @@ def extract_text_layer_pages(pdf_bytes: bytes) -> dict:
                 if "\u0980" <= ch <= "\u09ff" or (ch.isascii() and ch.isalnum())
             )
             if good_chars / max(1, non_space) < 0.88:
+                rejected[index] = "the text layer reads as mojibake"
                 continue
-            # Second signature: ENGLISH mojibake layers can be mostly readable
-            # ASCII with CJK/fullwidth shrapnel mixed in ("PAKIST域", "血蹈") —
-            # they pass the ratio test, but no legitimate Bengali or English
-            # document contains CJK characters. More than a couple = a
-            # poisoned legacy layer; send those pages to real OCR.
+            # ENGLISH mojibake layers can be mostly readable ASCII with
+            # CJK/fullwidth shrapnel mixed in ("PAKIST域", "血蹈").
             exotic_chars = sum(
                 1
                 for ch in text
@@ -1088,11 +1222,19 @@ def extract_text_layer_pages(pdf_bytes: bytes) -> dict:
                 or "\uff00" <= ch <= "\uffef"   # fullwidth forms
             )
             if exotic_chars > 2:
+                rejected[index] = "the text layer contains CJK/fullwidth shrapnel"
+                continue
+            noise = _symbol_noise_ratio(text)
+            if noise > TEXT_LAYER_MAX_SYMBOL_NOISE:
+                rejected[index] = (
+                    f"the text layer is {noise:.0%} stray symbols "
+                    "(a scrambled scan layer)"
+                )
                 continue
             pages[index] = text
     finally:
         src.close()
-    return pages
+    return pages, rejected
 
 
 def estimate_ocr_input_tokens(remote_chunks, input_mode: str, dpi: int):
@@ -1842,12 +1984,15 @@ if uploaded_pdf is not None:
 
         chunks_done = st.session_state["chunks_done"]
 
-        # FREE PATH: pages with an embedded text layer are extracted locally.
-        # A chunk whose entire page range has a text layer never touches the
-        # API — it is pre-populated as already done, at zero cost.
+        # FREE PATH: pages with a TRUSTWORTHY embedded text layer are
+        # extracted locally. A chunk whose entire page range qualifies never
+        # touches the API. Scanned pages that merely carry a hidden legacy OCR
+        # layer are deliberately excluded — see extract_text_layer_pages.
         if use_text_layer:
             with st.spinner("Checking for an embedded text layer..."):
-                text_layer_pages = extract_text_layer_pages(uploaded_pdf_bytes)
+                text_layer_pages, rejected_layer_pages = extract_text_layer_pages(
+                    uploaded_pdf_bytes
+                )
             if text_layer_pages:
                 local_chunks = 0
                 local_pages = 0
@@ -1865,16 +2010,28 @@ if uploaded_pdf is not None:
                         local_pages += end - start + 1
                 if local_chunks:
                     st.success(
-                        f"💰 {local_pages} page(s) had an embedded text layer and "
-                        f"were extracted locally — {local_chunks} chunk(s) will "
-                        "cost nothing."
+                        f"💰 {local_pages} page(s) had a trustworthy embedded text "
+                        f"layer and were extracted locally — {local_chunks} chunk(s) "
+                        "will cost nothing."
                     )
-                elif len(text_layer_pages) > 0:
+                else:
                     st.info(
-                        f"{len(text_layer_pages)} page(s) have a text layer but "
-                        "share chunks with scanned pages — reduce 'Pages per OCR "
-                        "chunk' to let them skip the API."
+                        f"{len(text_layer_pages)} page(s) have a usable text layer "
+                        "but share chunks with scanned pages — reduce 'Pages per OCR "
+                        "request' to let them skip the API."
                     )
+            if rejected_layer_pages:
+                order = sorted(rejected_layer_pages)
+                sample = ", ".join(str(p + 1) for p in order[:8])
+                if len(order) > 8:
+                    sample += ", ..."
+                st.info(
+                    f"{len(rejected_layer_pages)} page(s) carry an embedded text "
+                    f"layer that is NOT real document text — {rejected_layer_pages[order[0]]}. "
+                    f"Affected page(s): {sample}. These pages are being read by "
+                    "Gemini instead; trusting the built-in layer would return a "
+                    "scrambled transcription for free rather than a correct one."
+                )
 
         # Input-token estimate for the requests that will actually be sent.
         remote_chunks = [
@@ -2832,7 +2989,8 @@ EXTRACTION_RULES = """You are extracting structured data from the minutes of an 
     Preserve every table as a Markdown pipe table: one header row, one separator row,
     and every data row. Never flatten a table into ordinary paragraph text.
   - resolution: full "সিদ্ধান্ত : ..." text verbatim. If the resolution is missing in this text portion, use null. Preserve any table in the resolution as a Markdown pipe table too.
-  - OLD FORMAT: older minutes have no প্রস্তাব নং items; instead a সিদ্ধান্তাবলী (decisions) section — or in English a "RESOLUTIONS:" section — lists numbered items (১।, ২।, ... / 1., 2., ...). Treat each numbered item as one agenda entry: body = the item's full text verbatim. If the item text itself states the decision (…সিদ্ধান্ত গ্রহণ করা হয়, …অনুমোদন করা হয়, …কনফার্ম করা হয়; English: "Confirmed ...", "... and resolved that ...", "Considered and approved ..."), also copy that deciding sentence (or the whole item if it is one sentence) into resolution; otherwise resolution = null. If a page BEGINS with a short, complete, standalone decision paragraph that carries no number (its number may have been lost in a damaged margin) and is not a mid-sentence continuation of the previous item, treat it as its OWN agenda entry rather than appending it to the previous item.
+  - ONE PROPOSAL = ONE AGENDA ENTRY, EVEN ACROSS PAGES: a proposal begins at a "প্রস্তাব নং ..." line and continues until the NEXT "প্রস্তাব নং ..." line. Everything in between belongs to that same entry: continuation paragraphs, tables and table rows that carry on over a page break, repeated table headers, the section/department/faculty headings that label those tables (e.g. "স্থাপত্য বিভাগ", "পুরকৌশল বিভাগ", "আই.পি.ই বিভাগ", "যন্ত্রকৌশল বিভাগ"), lists of names, roll numbers or course codes, and that item's own "সিদ্ধান্ত ঃ" text. NEVER begin a new agenda entry merely because a new page starts, a new table starts, or a new heading appears. If a page begins with a table, a table header row, a heading, or any text that is not itself a "প্রস্তাব নং ..." line, it is a CONTINUATION: append it to the body of the proposal already in progress, keeping every table as a Markdown pipe table. In this format an agenda entry whose body does not begin with "প্রস্তাব নং" is always a mistake.
+  - OLD FORMAT: older minutes have no প্রস্তাব নং items; instead a সিদ্ধান্তাবলী (decisions) section — or in English a "RESOLUTIONS:" section — lists numbered items (১।, ২।, ... / 1., 2., ...). Treat each numbered item as one agenda entry: body = the item's full text verbatim. If the item text itself states the decision (…সিদ্ধান্ত গ্রহণ করা হয়, …অনুমোদন করা হয়, …কনফার্ম করা হয়; English: "Confirmed ...", "... and resolved that ...", "Considered and approved ..."), also copy that deciding sentence (or the whole item if it is one sentence) into resolution; otherwise resolution = null. This next exception applies ONLY to that old format — a document that contains no "প্রস্তাব নং" item anywhere: if a page BEGINS with a short, complete, standalone decision paragraph that carries no number (its number may have been lost in a damaged margin) and is not a continuation of the previous item, treat it as its OWN agenda entry. It NEVER applies to a document that uses প্রস্তাব নং, and it never applies to a table, a table header row, or a section/department heading.
 - Copy all Bengali text EXACTLY as written (do not modernize spelling, do not translate, do not transliterate). Fix only obvious OCR artifacts like stray Latin/Arabic/Devanagari characters inside Bengali words when the correct Bengali word is unambiguous. Keep [?] illegible-word placeholders exactly where the OCR placed them.
 - Strip page markers like '=== PAGE n ===' and page headers/footers/page numbers from all extracted text.
 - NEVER invent values. If a field is not present in this text portion, use null (or [] for lists)."""
@@ -3021,8 +3179,17 @@ def merge_meeting_partials(partials: list) -> dict:
 
     # Agenda: merge by proposal number found in the body (or serial as fallback).
     def proposal_key(item):
-        m = re.search(r"প্রস্তাব নং\s*\S*\s*([০-৯0-9]+)", item.get("body") or "")
-        return m.group(1) if m else f"serial-{item.get('serial')}"
+        # Merge on the printed proposal number, normalized to Arabic digits so
+        # "প্রস্তাব নং এ ১৪০১০৬৫" and "1401065" are the same item. Without a
+        # number, fall back to the item's own opening words — NOT its serial,
+        # because chunk-local serials collide across chunks and would merge two
+        # unrelated old-format items into one.
+        text = (item.get("body") or "")[:300]
+        match = re.search(r"প্রস্তাব\s*নং[^০-৯0-9]{0,15}([০-৯0-9]+)", text)
+        if match:
+            return "prop-" + match.group(1).translate(BENGALI_TO_ARABIC_DIGITS)
+        opening = re.sub(r"\s+", " ", text).strip()[:60]
+        return "text-" + (opening or f"serial-{item.get('serial')}")
 
     merged = {}
     order = []
@@ -3043,6 +3210,90 @@ def merge_meeting_partials(partials: list) -> dict:
     for i, item in enumerate(final["agenda"], 1):
         item["serial"] = i  # renumber sequentially after merge
     return final
+
+
+_PROPOSAL_HEAD_RE = re.compile(r"প্রস্তাব\s*নং")
+
+# Headings that legitimately open their own entry without a proposal number —
+# the "any other business" block at the end of the minutes. Everything else
+# without a proposal number is a continuation of the item above it.
+_STANDALONE_SECTION_RE = re.compile(
+    r"^\s*(?:<p>)?\s*(?:বিবিধ|অন্যান্য|বিবিধ\s+বিষয়|Miscellaneous|"
+    r"Any\s+Other\s+Business)\s*[ঃ:।\-]"
+)
+
+
+def _agenda_uses_proposal_numbers(agenda: list) -> bool:
+    """True for the modern format where every item starts with প্রস্তাব নং."""
+    numbered = sum(
+        1
+        for item in agenda or []
+        if _PROPOSAL_HEAD_RE.search((item.get("body") or "")[:200])
+    )
+    return numbered >= 2 and numbered >= len(agenda or []) // 2
+
+
+def stitch_split_agenda_items(meeting: dict):
+    """Re-join a proposal that was split across a page or chunk boundary.
+
+    In the modern format every agenda entry starts with "প্রস্তাব নং ...".
+    When a proposal's tables or trailing paragraphs continue onto the next
+    page, the model sometimes emits that continuation as a SEPARATE entry with
+    no proposal number at all — which is how প্রস্তাব নং এ ১৪০১০৬৫ came back as
+    two agenda items, the second one headless.
+
+    Any entry without its own proposal heading is therefore folded back into
+    the entry above it: body appended, resolution carried over. Purely local
+    and deterministic, so it costs nothing and cannot invent text. Old-format
+    minutes (numbered সিদ্ধান্তাবলী items, English RESOLUTIONS) are left alone,
+    because there every item legitimately lacks a proposal number.
+
+    Returns (meeting, notes) where notes describes each re-join for the UI.
+    """
+    result = dict(meeting or {})
+    agenda = [dict(item or {}) for item in (result.get("agenda") or [])]
+    if not agenda or not _agenda_uses_proposal_numbers(agenda):
+        return result, []
+
+    stitched = []
+    notes = []
+    for item in agenda:
+        body = (item.get("body") or "").strip()
+        if (
+            not stitched
+            or _PROPOSAL_HEAD_RE.search(body[:200])
+            or _STANDALONE_SECTION_RE.match(body)
+        ):
+            stitched.append(item)
+            continue
+
+        previous = stitched[-1]
+        previous_body = (previous.get("body") or "").rstrip()
+        if body:
+            previous["body"] = (previous_body + "\n\n" + body).strip()
+
+        previous_resolution = (previous.get("resolution") or "").strip()
+        resolution = (item.get("resolution") or "").strip()
+        if resolution and resolution not in previous_resolution:
+            previous["resolution"] = (
+                (previous_resolution + "\n\n" + resolution).strip()
+                if previous_resolution
+                else resolution
+            )
+
+        heading = re.search(
+            r"প্রস্তাব\s*নং[^\n:ঃ]{0,28}", previous.get("body") or ""
+        )
+        label = (heading.group(0) if heading else previous_body[:40]).strip()
+        snippet = re.sub(r"\s+", " ", body).strip()[:45]
+        notes.append(
+            f'a continuation block starting "{snippet}…" was re-joined to "{label}…"'
+        )
+
+    for position, item in enumerate(stitched, 1):
+        item["serial"] = position
+    result["agenda"] = stitched
+    return result, notes
 
 
 ISO_DATE_RE = re.compile(
@@ -3141,6 +3392,19 @@ def meeting_quality_report(meeting: dict) -> list:
             issues.append(
                 "agenda item(s) without a resolution: " + ", ".join(unresolved)
             )
+        if _agenda_uses_proposal_numbers(agenda):
+            headless = [
+                str(item.get("serial"))
+                for item in agenda
+                if not _PROPOSAL_HEAD_RE.search((item.get("body") or "")[:200])
+                and not _STANDALONE_SECTION_RE.match((item.get("body") or "").strip())
+            ]
+            if headless:
+                issues.append(
+                    "agenda item(s) that do not start with 'প্রস্তাব নং': "
+                    + ", ".join(headless)
+                    + " — a proposal was probably split across a page boundary"
+                )
 
     return issues
 
@@ -3700,6 +3964,7 @@ if st.button(json_button_label, type="primary", use_container_width=True):
             if len(partials) > 1
             else dict(partials[0])
         )
+        final, stitch_notes = stitch_split_agenda_items(final)
         final = _finalize_scalars(final)
         final = normalize_meeting_entities(final, name_roster=roster_names)
         applied_corrections = final.pop("_name_corrections", [])
@@ -3713,6 +3978,13 @@ if st.button(json_button_label, type="primary", use_container_width=True):
             )
         else:
             st.success("Quality report passed ✅ — all key fields present and consistent.")
+
+        if stitch_notes:
+            st.info(
+                f"🔧 {len(stitch_notes)} agenda continuation(s) were re-joined to "
+                "their proposal (a proposal split across a page boundary):\n\n- "
+                + "\n- ".join(stitch_notes)
+            )
 
         if applied_corrections:
             st.info(
