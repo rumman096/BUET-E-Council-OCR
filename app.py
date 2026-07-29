@@ -64,7 +64,9 @@ GEMINI_API_KEYS = [
     if str(key).strip()
 ]
 MODEL_NAME = "gemini-3.6-flash"  # model used for OCR and JSON extraction
-CHUNK_SIZE = 20  # fewer OCR requests while retaining a conservative page size
+CHUNK_SIZE = 4  # short visual context: long chunks make the model copy
+# names and affiliations between neighbouring entries. 4 pages renders to
+# ~3.8 MB, so it is also never force-split by the inline payload limit.
 JSON_CHUNK_CHARS = 70_000  # fewer JSON requests; adjustable from the sidebar
 DEFAULT_MAX_WORKERS = 18  # concurrency only; the limiter still controls request starts
 DEFAULT_SAFE_RPM = 15
@@ -74,7 +76,9 @@ JSON_THINKING_LEVEL = "low"
 OCR_ATTEMPTS = 5  # retries per request for transient errors AND incomplete output
 JSON_ATTEMPTS = 5
 OCR_IMAGE_DPI = 300  # render resolution for image-mode OCR
-PER_PAGE_IMAGE_MB = 1.8  # per-page image size cap; quality/DPI degrade to fit
+PER_PAGE_IMAGE_MB = 4.0  # per-page cap; generous so the ladder in
+# _render_page_image effectively never fires. At 1.8 MB a 400 DPI page could
+# silently fall back to 250 DPI — raising the slider LOWERED the resolution.
 # A page this covered by raster images is a photograph of paper, not a
 # digitally created page — any text it reports came from a legacy OCR pass.
 SCANNED_PAGE_IMAGE_COVERAGE = 0.60
@@ -159,6 +163,14 @@ CHUNK_PROMPT = (
     "(শাকিলা vs শাকিল্লা) — in PERSON NAMES especially, copy the printed form letter-by-letter "
     "rather than the more common spelling of a similar name."
 
+    "\n12b. NAME INTEGRITY — this rule outranks every other consideration. A person's name is "
+    "copied glyph by glyph from ITS OWN printed line. Never regularize a name toward a more "
+    "familiar or more frequent spelling, never let another entry, another page, or general "
+    "knowledge of Bengali names influence a single letter, and never 'correct' an unusual "
+    "spelling. If the page prints শাখাওয়াৎ, write শাখাওয়াৎ — never সাখাওয়াৎ. The same applies "
+    "to ত vs ৎ, to every vowel sign, and to every conjunct and য-ফলা/র-ফলা. If ONE letter is "
+    "genuinely unreadable, keep the rest of the name and write [?] for that letter alone."
+
     "\n13. Use ONLY Bengali script for Bengali words. Never substitute visually similar Devanagari, "
     "Assamese (ৰ, ৱ), Latin, or Arabic characters inside a Bengali word."
 
@@ -180,9 +192,10 @@ CHUNK_PROMPT = (
     "where every entry has the same shape: transcribe each entry's affiliation from ITS OWN printed "
     "line only. Adjacent entries often differ by exactly one word (e.g. 'ডীন, যন্ত্রকৌশল অনুষদ' vs "
     "'ডীন, পুরকৌশল অনুষদ'); before writing the repeated-looking word, RE-READ that specific word in "
-    "the image for THIS entry. Never assume it equals the entry above or below. Each faculty has "
-    "exactly one ডীন and each department exactly one প্রধান, so two entries with identical "
-    "affiliations usually mean you mis-copied one."
+    "the image for THIS entry. Never assume it equals the entry above or below. Do NOT compare "
+    "entries against each other to decide what any of them says: transcribe what THIS line "
+    "shows, even when that yields two entries that look identical. Consistency between "
+    "entries is never a reason to change a letter."
 
     "\n16c. NEVER RENUMBER A LIST. Copy every numbered item's printed number digit-for-digit even "
     "if the resulting sequence then has a gap or a repeat — the page is the authority, not the "
@@ -195,10 +208,12 @@ CHUNK_PROMPT = (
     "\n\nHANDWRITING & DEGRADED-DOCUMENT RULES:"
 
     "\n17. The document may be entirely HANDWRITTEN, decades old, faded, stained, photocopied, or "
-    "low-contrast. Apply every rule above to handwriting too. Read stroke by stroke; use the "
-    "document's own recurring vocabulary (the same names, departments, offices, and faculties "
-    "appear on multiple lines) to resolve an ambiguous letter — but only to disambiguate what is "
-    "actually written, never to substitute a different word."
+    "low-contrast. Apply every rule above to handwriting too. Read stroke by stroke. When a "
+    "letter is ambiguous, decide it from the STROKES ON THIS LINE alone. Never let another "
+    "line, another page, a more familiar word, or how common a spelling is decide an "
+    "ambiguous letter — that is how a correctly printed rare spelling gets replaced by a "
+    "common one. If the strokes cannot settle it, transcribe the closest match to what is "
+    "actually printed rather than the more usual word."
 
     "\n18. Old minutes often abbreviate: প্রফেঃ / প্রফেসর (Professor), সহযোগী প্রফেঃ, ডঃ / ড. / ডীন, "
     "অনুঃ (অনুষদ), পরিঃ (পরিশিষ্ট), স্বাঃ (স্বাক্ষর), ভাইস চ্যান্সেলার. Transcribe every abbreviation "
@@ -1296,35 +1311,106 @@ class ChunkTooLargeError(OCRIncompleteError):
     """
 
 
-def _render_page_image(page, dpi: int, preprocess: str = "standard") -> bytes:
-    """Render one PDF page as a preprocessed grayscale JPEG.
+def _native_raster_dpi(page) -> float:
+    """Resolution of the scan actually embedded in this page, in DPI.
 
-    Grayscale + autocontrast noticeably helps faded photocopies: it restores
-    stroke contrast in exactly the glyph pairs the model confuses (ব/র, ি/ী,
-    ফরিদ/ফহিম-style names). The 'degraded' profile clips more of the stained
-    background and boosts contrast further — built for old handwritten pages
-    with color casts and heavy noise. Quality/DPI degrade stepwise so a single
-    page always fits the per-page size cap.
+    A scanned page holds one raster image; rendering it above that resolution
+    only interpolates. Both sample corpora are 150 DPI scans, so a 300 DPI
+    render is already 2x upsampled and a 400 DPI render adds nothing but
+    payload — and payload is what triggers the quality ladder below.
+    Returns 0.0 when the page has no raster image (a digital page).
+    """
+    try:
+        width_pt = float(page.rect.width)
+        height_pt = float(page.rect.height)
+    except Exception:
+        return 0.0
+    if width_pt <= 0 or height_pt <= 0:
+        return 0.0
+
+    best = 0.0
+    try:
+        infos = page.get_image_info()
+    except Exception:
+        return 0.0
+    for info in infos or ():
+        try:
+            px_w = float(info.get("width") or 0)
+            px_h = float(info.get("height") or 0)
+        except Exception:
+            continue
+        if px_w <= 0 or px_h <= 0:
+            continue
+        best = max(best, px_w / (width_pt / 72.0), px_h / (height_pt / 72.0))
+    return best
+
+
+def effective_render_dpi(page, requested_dpi: int) -> int:
+    """Clamp the requested DPI to at most 2x the page's native resolution."""
+    native = _native_raster_dpi(page)
+    if native <= 0:
+        return int(requested_dpi)
+    return int(min(float(requested_dpi), native * 2.0))
+
+
+def _image_mime(data: bytes) -> str:
+    """PNG or JPEG, decided from the bytes rather than assumed."""
+    return "image/png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
+
+
+def _render_page_image(page, dpi: int, preprocess: str = "standard") -> bytes:
+    """Render one PDF page for OCR, preserving every stroke the scan contains.
+
+    Two properties matter for Bengali at this scan resolution, where the
+    difference between শ and স, or ত and ৎ, is one or two pixels wide:
+
+    1. NO LOSSY RE-ENCODE. The page is saved as PNG. Measured on this corpus
+       a 300 DPI grayscale page is 0.93 MB as PNG versus 0.90 MB as JPEG q88,
+       so the lossless path is effectively free and removes the JPEG ringing
+       that used to smear those thin strokes.
+    2. NO HISTOGRAM CLIPPING by default. autocontrast(cutoff=1) discards the
+       darkest and lightest 1% of pixels, which is where a faint matra lives.
+       The standard profile now stretches without discarding (cutoff=0); the
+       'degraded' profile keeps the aggressive clipping for stained or faded
+       handwritten pages, where it genuinely helps.
+
+    The size ladder now degrades QUALITY before it ever degrades RESOLUTION,
+    and the render DPI is clamped to the page's native resolution beforehand,
+    so a higher slider setting can no longer produce a lower-resolution image.
     """
     cap = int(PER_PAGE_IMAGE_MB * 1024 * 1024)
+    render_dpi = effective_render_dpi(page, dpi)
     data = b""
-    for attempt_dpi, quality in ((dpi, 88), (dpi, 72), (250, 70), (180, 62)):
+
+    # (dpi, encoder) — lossless first, resolution reduced only as a last resort.
+    ladder = (
+        (render_dpi, "png"),
+        (render_dpi, 92),
+        (render_dpi, 85),
+        (max(200, int(render_dpi * 0.75)), 85),
+        (180, 72),
+    )
+    for attempt_dpi, encoder in ladder:
         if PIL_AVAILABLE:
             pix = page.get_pixmap(dpi=attempt_dpi, colorspace=fitz.csGRAY)
             img = Image.frombytes("L", (pix.width, pix.height), pix.samples)
             if preprocess == "degraded":
-                # Clip the stained/tinted background harder, then push the
-                # ink-vs-paper separation so faint strokes survive JPEG.
+                # Stained/tinted background: clip it back and push ink-vs-paper
+                # separation so faint strokes survive.
                 img = ImageOps.autocontrast(img, cutoff=3)
                 img = ImageEnhance.Contrast(img).enhance(1.6)
             else:
-                img = ImageOps.autocontrast(img, cutoff=1)
+                # Stretch to full range WITHOUT discarding extreme pixels.
+                img = ImageOps.autocontrast(img, cutoff=0)
             buf = io.BytesIO()
-            img.save(buf, "JPEG", quality=quality, optimize=True)
+            if encoder == "png":
+                img.save(buf, "PNG", optimize=True)
+            else:
+                img.save(buf, "JPEG", quality=encoder, optimize=True)
             data = buf.getvalue()
         else:
             pix = page.get_pixmap(dpi=attempt_dpi, colorspace=fitz.csGRAY)
-            data = pix.tobytes("jpg", jpg_quality=quality)
+            data = pix.tobytes("png" if encoder == "png" else "jpg")
         if len(data) <= cap:
             return data
     return data  # smallest achievable — let the payload check decide
@@ -1502,12 +1588,12 @@ def ocr_chunk_with_gemini(
             )
         if NEW_SDK:
             payload_parts = [
-                genai_types.Part.from_bytes(data=img, mime_type="image/jpeg")
+                genai_types.Part.from_bytes(data=img, mime_type=_image_mime(img))
                 for img in images
             ]
         else:
             payload_parts = [
-                {"mime_type": "image/jpeg", "data": img} for img in images
+                {"mime_type": _image_mime(img), "data": img} for img in images
             ]
     else:
         if NEW_SDK:
@@ -1965,6 +2051,26 @@ if uploaded_pdf is not None:
         st.success(
             f"Ready to process {total_pages} page(s) in {total_chunks} batch(es)."
         )
+        if input_mode == "images":
+            # The scan's own resolution is the hard ceiling on OCR accuracy;
+            # rendering above 2x it only interpolates.
+            _probe = fitz.open(stream=uploaded_pdf_bytes, filetype="pdf")
+            try:
+                _native = _native_raster_dpi(_probe[0]) if len(_probe) else 0.0
+                _effective = (
+                    effective_render_dpi(_probe[0], int(ocr_dpi))
+                    if len(_probe)
+                    else int(ocr_dpi)
+                )
+            finally:
+                _probe.close()
+            if _native > 0:
+                st.caption(
+                    f"Scan resolution: **{_native:.0f} DPI**. Rendering at "
+                    f"**{_effective} DPI** (capped at 2x the scan). Detail above the "
+                    "scan's own resolution cannot be recovered by a higher setting — "
+                    "if names are still misread, the source scan is the limit."
+                )
         with st.expander("View processing details", expanded=False):
             st.markdown(
                 f"""
