@@ -91,6 +91,17 @@ CHUNK_PROMPT = (
     "text from every page of this PDF exactly as it appears. Silently analyze EACH PAGE's layout "
     "independently before deciding its reading order; never output the analysis itself."
 
+    "\n\nWHY THIS MATTERS — read this before any other rule. Every NAME, DATE and NUMBER you "
+    "transcribe is copied verbatim into a permanent institutional database, where it identifies "
+    "real people, and it is NEVER re-checked against this page afterwards. A name that is fluent, "
+    "plausible and wrong is therefore the worst output you can produce: it is indistinguishable "
+    "from a correct one and it corrupts the record silently and permanently. Your priorities, "
+    "highest first: (1) every character of every name, date and number matches this page exactly; "
+    "(2) nothing is invented; (3) nothing is omitted; (4) the text reads naturally. When (1) and "
+    "(4) conflict, (1) wins, every single time. Marking something [?] is a GOOD outcome — a human "
+    "then checks it. Guessing in order to produce clean, complete-looking text is a FAILURE, even "
+    "when the guess is reasonable and even when you are confident."
+
     "\n\nCOMPLETENESS RULES (mandatory):"
 
     "\nA. Before each page's content, write a line exactly like: '=== PAGE n ===' where n is the "
@@ -3311,7 +3322,7 @@ EXTRACTION_RULES = """You are extracting structured data from the minutes of an 
 - conclusion: the closing paragraph or approval block verbatim (পরিশেষে... / অনুমোদিত; English: the "Approved / Sd/- ... Vice-Chancellor" block with the Registrar signature).
 - presentees: EVERY attendee from the presence list (উপস্থিত সদস্যবৃন্দ / "MEMBERS PRESENT:"), in document order. Do not skip, invent, or merge any attendee. Split each entry into:
   - prefix: honorific as written ("অধ্যাপক ডঃ", "ডঃ", "ড.", "জনাব", "বাবু", "প্রফেসর", "Dr.", "Mr.", "Mrs.", ...)
-  - name: name only, without prefix
+  - name: name only, without prefix. Copy it character for character from the OCR text. Never normalize, complete, shorten, re-spell or “correct” a name, and never replace it with a more familiar one. If the OCR text has [?] inside a name, keep the [?] exactly where it is — it marks a character a human must verify.
   - designation: the ONLY permitted non-null output values are exactly "অধ্যাপক" and "সহযোগী অধ্যাপক" — in BOTH languages. ALL professor spellings mean অধ্যাপক: প্রফেসর, প্রোফেসর, the abbreviation প্রফেঃ, English Professor / Prof. → output "অধ্যাপক". সহযোগী প্রফেসর / সহযোগী প্রফেঃ / সহযোগী অধ্যাপক / Associate Professor → output "সহযোগী অধ্যাপক". Any সহকারী / Assistant / Asstt. rank or anything else → null. You may infer "অধ্যাপক" from an unambiguous prefix such as "অধ্যাপক ডঃ" or "প্রফেসর".
   - If an entry's detail column is a rank plus a department (e.g. "প্রফেসর, যন্ত্রকৌশল বিভাগ", "সহযোগী প্রফেঃ, তড়িৎ কৌশল", or English "Professor of Civil Engineering", "Associate Professor of Electrical Engg."), that is a designation + department, NOT an office: set designation per the rule above, department to the department text, and office to null.
   - department: extract the department/institute as written if stated, else null. Local code will replace a close match with the exact canonical department name from the supplied SQL list; a very different or ambiguous value will remain unchanged.
@@ -3329,7 +3340,7 @@ EXTRACTION_RULES = """You are extracting structured data from the minutes of an 
   - resolution: full "সিদ্ধান্ত : ..." text verbatim. If the resolution is missing in this text portion, use null. Preserve any table in the resolution as a Markdown pipe table too.
   - ONE PROPOSAL = ONE AGENDA ENTRY, EVEN ACROSS PAGES: a proposal begins at a "প্রস্তাব নং ..." line and continues until the NEXT "প্রস্তাব নং ..." line. Everything in between belongs to that same entry: continuation paragraphs, tables and table rows that carry on over a page break, repeated table headers, the section/department/faculty headings that label those tables (e.g. "স্থাপত্য বিভাগ", "পুরকৌশল বিভাগ", "আই.পি.ই বিভাগ", "যন্ত্রকৌশল বিভাগ"), lists of names, roll numbers or course codes, and that item's own "সিদ্ধান্ত ঃ" text. NEVER begin a new agenda entry merely because a new page starts, a new table starts, or a new heading appears. If a page begins with a table, a table header row, a heading, or any text that is not itself a "প্রস্তাব নং ..." line, it is a CONTINUATION: append it to the body of the proposal already in progress, keeping every table as a Markdown pipe table. In this format an agenda entry whose body does not begin with "প্রস্তাব নং" is always a mistake.
   - OLD FORMAT: older minutes have no প্রস্তাব নং items; instead a সিদ্ধান্তাবলী (decisions) section — or in English a "RESOLUTIONS:" section — lists numbered items (১।, ২।, ... / 1., 2., ...). Treat each numbered item as one agenda entry: body = the item's full text verbatim. If the item text itself states the decision (…সিদ্ধান্ত গ্রহণ করা হয়, …অনুমোদন করা হয়, …কনফার্ম করা হয়; English: "Confirmed ...", "... and resolved that ...", "Considered and approved ..."), also copy that deciding sentence (or the whole item if it is one sentence) into resolution; otherwise resolution = null. This next exception applies ONLY to that old format — a document that contains no "প্রস্তাব নং" item anywhere: if a page BEGINS with a short, complete, standalone decision paragraph that carries no number (its number may have been lost in a damaged margin) and is not a continuation of the previous item, treat it as its OWN agenda entry. It NEVER applies to a document that uses প্রস্তাব নং, and it never applies to a table, a table header row, or a section/department heading.
-- Copy all Bengali text EXACTLY as written (do not modernize spelling, do not translate, do not transliterate). Fix only obvious OCR artifacts like stray Latin/Arabic/Devanagari characters inside Bengali words when the correct Bengali word is unambiguous. Keep [?] illegible-word placeholders exactly where the OCR placed them.
+- Copy all Bengali text EXACTLY as written (do not modernize spelling, do not translate, do not transliterate). Fix only obvious OCR artifacts like stray Latin/Arabic/Devanagari characters inside Bengali words when the correct Bengali word is unambiguous — but NEVER apply this to a PERSON'S NAME. A name has no “correct” form other than the one printed, so pass every name through completely unchanged, character for character, even when it looks misspelled, unusual, or like a familiar name with one letter wrong. These names are written straight into a permanent database that identifies real people and is never re-checked against the document, so silently “improving” one is the most damaging thing you can do here. Keep [?] illegible-word placeholders exactly where the OCR placed them.
 - Strip page markers like '=== PAGE n ===' and page headers/footers/page numbers from all extracted text.
 - NEVER invent values. If a field is not present in this text portion, use null (or [] for lists)."""
 
