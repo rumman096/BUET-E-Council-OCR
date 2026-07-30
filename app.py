@@ -947,10 +947,117 @@ st.markdown(
             font-size: 0.88rem;
             line-height: 1.5;
         }
+
+        /* ===========================================================
+           6. ALWAYS-VISIBLE SCROLLBARS FOR PREVIEW AREAS
+           macOS (and iOS) draw "overlay" scrollbars: invisible until
+           the moment you actually scroll. A preview box therefore looks
+           like a dead end — the reader sees the first screenful and has
+           no signal that more text exists below. -webkit-appearance:none
+           opts out of the overlay style and pins a real, permanent bar
+           in the app's own colours. scrollbar-width/-color do the same
+           on Firefox.
+           =========================================================== */
+
+        .stApp, .stApp *, [data-testid="stSidebar"] * {
+            scrollbar-width: thin;
+            scrollbar-color: #cf9aa0 #f4ebec;
+        }
+
+        .stApp ::-webkit-scrollbar,
+        .stApp *::-webkit-scrollbar,
+        [data-testid="stSidebar"] ::-webkit-scrollbar {
+            -webkit-appearance: none !important;
+            width: 11px !important;
+            height: 11px !important;
+        }
+
+        .stApp ::-webkit-scrollbar-track,
+        .stApp *::-webkit-scrollbar-track,
+        [data-testid="stSidebar"] ::-webkit-scrollbar-track {
+            background: #f4ebec !important;
+            border-radius: 8px !important;
+        }
+
+        .stApp ::-webkit-scrollbar-thumb,
+        .stApp *::-webkit-scrollbar-thumb,
+        [data-testid="stSidebar"] ::-webkit-scrollbar-thumb {
+            background: #cf9aa0 !important;
+            border: 2px solid #f4ebec !important;
+            border-radius: 8px !important;
+        }
+
+        .stApp ::-webkit-scrollbar-thumb:hover,
+        .stApp *::-webkit-scrollbar-thumb:hover {
+            background: var(--ec-red) !important;
+        }
+
+        .stApp ::-webkit-scrollbar-corner,
+        .stApp *::-webkit-scrollbar-corner {
+            background: #f4ebec !important;
+        }
+
+        /* Preview frames. Streamlit's own `height=` argument does the
+           bounding and the scrolling now, so this only paints the frame —
+           no CSS max-height, which would fight it and produce two nested
+           scrollbars. */
+        [data-testid="stCode"] {
+            border: 1px solid var(--ec-border) !important;
+            border-radius: 10px !important;
+        }
+
+        [data-testid="stCode"] pre {
+            margin-bottom: 0 !important;
+        }
+
+        [data-testid="stTextArea"] textarea {
+            overflow: auto !important;
+            resize: vertical !important;   /* drag the corner for more room */
+        }
+
+        /* Generic helper for any custom scrolling block. */
+        .ec-scroll {
+            max-height: 420px;
+            overflow: auto;
+            padding: 0.6rem 0.8rem;
+            background: #ffffff;
+            border: 1px solid var(--ec-border);
+            border-radius: 10px;
+        }
     </style>
     """,
     unsafe_allow_html=True,
 )
+
+
+def scroll_box(height: int = 420, border: bool = True):
+    """A fixed-height panel whose content scrolls inside it.
+
+    Long previews otherwise stretch the page to many thousands of pixels,
+    which buries every control underneath them. `st.container(height=...)`
+    has existed since Streamlit 1.31; on anything older the keyword is
+    rejected, so fall back to a plain container rather than crashing the
+    app over a cosmetic detail.
+    """
+    try:
+        return st.container(height=height, border=border)
+    except TypeError:
+        return st.container()
+
+
+def code_block(text: str, language: str = "json", height: int = 460):
+    """A syntax-highlighted block that scrolls inside a fixed height.
+
+    Recent Streamlit takes `height` and `line_numbers` on st.code directly,
+    which scrolls better than wrapping the block in a container. Older
+    releases reject those keywords, so fall back to the container.
+    """
+    try:
+        st.code(text, language=language, height=height, line_numbers=True)
+    except TypeError:
+        with scroll_box(height):
+            st.code(text, language=language)
+
 
 st.markdown(
     """
@@ -2520,7 +2627,8 @@ if uploaded_pdf is not None:
                 "been copied from a neighbouring entry. Worth a quick check."
             )
             with st.expander("Show the lines to check", expanded=False):
-                st.markdown("- " + "\n- ".join(consistency_issues))
+                with scroll_box(300):
+                    st.markdown("- " + "\n- ".join(consistency_issues))
 
         # Page-boundary audit: catches an item number lost in a damaged margin
         # followed by silent renumbering of the rest of the list.
@@ -2531,9 +2639,11 @@ if uploaded_pdf is not None:
                 "page edge. The app re-reads those pages on their own to check."
             )
             with st.expander("Show the pages to check", expanded=False):
-                st.markdown(
-                    "- " + "\n- ".join(issue["message"] for issue in boundary_issues)
-                )
+                with scroll_box(300):
+                    st.markdown(
+                        "- "
+                        + "\n- ".join(issue["message"] for issue in boundary_issues)
+                    )
 
             # AUTO CROSS-CHECK: renumbering happens because the model remembers
             # the previous page's last item number ("after ৭ comes ৮") and that
@@ -2606,9 +2716,14 @@ if "ocr_result" in st.session_state:
         mime="text/markdown",
     )
     with st.expander("Preview extracted text", expanded=False):
+        ocr_preview_text = st.session_state["ocr_result"]
+        st.caption(
+            f"{len(ocr_preview_text):,} characters — scroll inside the box below. "
+            "Drag its bottom-right corner to make it taller."
+        )
         st.text_area(
             "Combined OCR output",
-            st.session_state["ocr_result"],
+            ocr_preview_text,
             height=400,
         )
 
@@ -4360,7 +4475,8 @@ if st.button(
                 "before you use this record."
             )
             with st.expander("Show what to verify", expanded=False):
-                st.markdown("- " + "\n- ".join(issues))
+                with scroll_box(300):
+                    st.markdown("- " + "\n- ".join(issues))
         else:
             st.success("Quality report passed ✅ — all key fields present and consistent.")
 
@@ -4398,4 +4514,24 @@ if "json_result" in st.session_state:
         mime="application/json",
     )
     with st.expander("Preview JSON", expanded=False):
-        st.code(st.session_state["json_result"], language="json")
+        json_preview_text = st.session_state["json_result"]
+        st.caption(
+            f"{len(json_preview_text.splitlines()):,} lines — scroll inside the "
+            "box below."
+        )
+        json_view = st.radio(
+            "How would you like to see it?",
+            ["Raw text", "Collapsible tree"],
+            horizontal=True,
+            key="json_preview_view",
+            label_visibility="collapsed",
+        )
+        with_tree = json_view == "Collapsible tree"
+        if with_tree:
+            with scroll_box(460):
+                try:
+                    st.json(json.loads(json_preview_text), expanded=False)
+                except json.JSONDecodeError:
+                    code_block(json_preview_text, "json", 440)
+        else:
+            code_block(json_preview_text, "json", 460)
