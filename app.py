@@ -1,4 +1,4 @@
-import time
+\import time
 import html
 import hashlib
 import io
@@ -4278,15 +4278,37 @@ source_choice = st.radio(
 )
 
 manual_text = ""
-if source_choice == "Upload or paste extracted text":
+if source_choice.startswith("Upload"):
     txt_file = st.file_uploader(
         "Upload extracted text (.txt / .md)",
         type=["txt", "md"],
         key="txt_up",
     )
+
+    # Keep manually pasted text in session state so it survives Streamlit reruns.
+    # When a different text file is uploaded, load it into the same editable box
+    # exactly once; afterwards the user can continue editing it normally.
+    if "manual_json_text" not in st.session_state:
+        st.session_state["manual_json_text"] = ""
+
     if txt_file is not None:
-        manual_text = txt_file.read().decode("utf-8", errors="replace")
-    manual_text = st.text_area("...or paste text here", value=manual_text, height=150)
+        uploaded_bytes = txt_file.getvalue()
+        uploaded_signature = hashlib.sha256(uploaded_bytes).hexdigest()
+        if st.session_state.get("manual_json_upload_signature") != uploaded_signature:
+            st.session_state["manual_json_text"] = uploaded_bytes.decode(
+                "utf-8", errors="replace"
+            )
+            st.session_state["manual_json_upload_signature"] = uploaded_signature
+
+    manual_text = st.text_area(
+        "Paste or edit the extracted meeting text here",
+        height=350,
+        key="manual_json_text",
+        placeholder=(
+            "Paste the complete OCR/extracted meeting text here. "
+            "Then press Create the meeting record."
+        ),
+    )
 
 current_json_source = (
     manual_text
@@ -4339,7 +4361,7 @@ json_button_label = (
 _step_two_ready = bool(current_json_source.strip())
 if not _step_two_ready:
     st.markdown(
-        "<div class='ec-help'>Step 2 unlocks once Step 1 has produced text. Read a document above, or switch the source to <b>Upload or paste extracted text</b> and provide your own.</div>",
+        "<div class='ec-help'>Step 2 unlocks once Step 1 has produced text. Read a document above, or switch the source to <b>Upload or paste my own text</b> and provide your own.</div>",
         unsafe_allow_html=True,
     )
 
