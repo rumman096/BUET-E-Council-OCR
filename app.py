@@ -215,7 +215,12 @@ PROMPT_LAYOUT = (
     "full-width text below comes after."
     "\nL6. Tables, tabular rows, aligned lists and forms are never split into columns. Keep each "
     "table together as a Markdown pipe table with one header row, one separator row and every "
-    "data row, in printed row order."
+    "data row, in printed row order. Preserve the EXACT number and position of columns, including "
+    "every empty cell. If the printed top-left header cell is blank, the Markdown header MUST begin "
+    "with that blank cell (for example: | | Marks | Grade |). The header, separator and every data "
+    "row must have the same number of cells. Never drop the first label column, never shift a value "
+    "under the wrong heading, and never omit a final column such as Grade Point. For a printed merged "
+    "cell, put its text in the leftmost covered column and leave the other covered columns empty."
 )
 
 PROMPT_BENGALI = (
@@ -3392,7 +3397,14 @@ EXTRACTION_RULES = """You are extracting structured data from the minutes of an 
   - serial: sequential integer position of the proposal (1, 2, 3, ...)
   - body: full proposal text verbatim, starting with "প্রস্তাব নং ...". Preserve line breaks as \n.
     Preserve every table as a Markdown pipe table: one header row, one separator row,
-    and every data row. Never flatten a table into ordinary paragraph text.
+    and every data row. Never flatten a table into ordinary paragraph text. Preserve
+    the EXACT number and position of columns, including blank cells. A blank printed
+    top-left header is a real cell and MUST be written explicitly, e.g.
+    | | 150 এর মধ্যে প্রাপ্ত নম্বর | শতকরা প্রাপ্ত নম্বর | লেটার গ্রেড | গ্রেড পয়েন্ট |
+    The separator and every row must contain that same number of cells. Never delete
+    the first row-label column, never shift values left, and never omit a final value
+    such as Grade Point. If a printed header spans multiple columns, put its text in
+    the leftmost covered cell and leave the remaining covered header cells blank.
     A ONE-COLUMN table is still a table: write its header, separator, and every value
     on separate lines, each with leading and trailing pipes (for example | Header |,
     | --- |, | Value |). Never turn a one-column table into an inline pipe sequence.
@@ -4139,24 +4151,44 @@ def convert_bangla_points_to_html(text):
 
 
 def _split_markdown_table_row(line: str) -> list:
-    """Split one Markdown pipe-table row into cells."""
+    """Split a Markdown pipe row without losing empty or escaped cells.
+
+    Leading/trailing pipes are row borders and are removed. Interior empty cells
+    are preserved, and ``\\|`` inside cell text is treated as a literal pipe.
+    """
     value = str(line or "").strip()
+    if not value:
+        return []
+
+    # Remove only unescaped outer row-border pipes.
     if value.startswith("|"):
         value = value[1:]
-    if value.endswith("|"):
+    if value.endswith("|") and not value.endswith(r"\|"):
         value = value[:-1]
-    return [cell.strip() for cell in value.split("|")]
+
+    cells = []
+    current = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == "\\" and index + 1 < len(value) and value[index + 1] == "|":
+            current.append("|")
+            index += 2
+            continue
+        if char == "|":
+            cells.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    cells.append("".join(current).strip())
+    return cells
 
 
 def _is_markdown_table_separator(line: str) -> bool:
-    """Return True for one- or multi-column separator rows.
-
-    Examples: ``| --- |`` and ``| :--- | ---: |``. One-column tables are
-    common in the meeting minutes, so requiring two cells would incorrectly
-    flatten them into paragraph text.
-    """
+    """Return True for one- or multi-column Markdown separator rows."""
     cells = _split_markdown_table_row(line)
-    return len(cells) >= 1 and all(
+    return bool(cells) and all(
         bool(MARKDOWN_SEPARATOR_CELL.fullmatch(cell.replace(" ", "")))
         for cell in cells
     )
@@ -4165,24 +4197,31 @@ def _is_markdown_table_separator(line: str) -> bool:
 def _looks_like_table_row(line: str) -> bool:
     """Return True for a one- or multi-column Markdown pipe row.
 
-    Leading and trailing pipes give even a one-column row two pipe characters,
-    for example ``| IPE-307 |``. Requiring two CELLS used to reject all such
-    tables. A table start is still accepted only when followed by a separator
-    or another pipe row, so ordinary prose containing pipes is not promoted to
-    a table by one isolated line.
+    One-column rows require their leading and trailing pipes. Multi-column rows
+    may omit the outer borders, but must still contain at least one delimiter.
     """
     value = str(line or "").strip()
-    if value.count("|") < 2:
+    if not value or "<table" in value.lower() or "</table" in value.lower():
         return False
+
+    unescaped_pipes = len(re.findall(r"(?<!\\)\|", value))
+    if unescaped_pipes < 1:
+        return False
+
     cells = _split_markdown_table_row(value)
-    return len(cells) >= 1 and any(cell for cell in cells)
+    if not cells or not any(cell for cell in cells):
+        return False
+
+    # A one-cell row is safe only when it has explicit outer borders.
+    if len(cells) == 1:
+        return value.startswith("|") and value.endswith("|")
+    return True
 
 
 # Gemini normally preserves Markdown row breaks, but a long continuation that
 # begins on a new PDF page can occasionally arrive as one inline sequence:
-# ``| Header | | --- | | Row 1 | | Row 2 |``. Restore only the unambiguous
-# ONE-COLUMN form before the regular line-based parser runs. Multi-column tables
-# do not match this pattern and continue through the existing parser unchanged.
+# ``| Header | | --- | | Row 1 | | Row 2 |``. This form is unambiguous for
+# one-column tables and is repaired before the regular line parser runs.
 _FLATTENED_SINGLE_COLUMN_TABLE_RE = re.compile(
     r"(?P<header>\|\s*[^|\n<>]+?\s*\|)"
     r"[ \t\r\n]+"
@@ -4193,13 +4232,7 @@ _FLATTENED_SINGLE_COLUMN_TABLE_RE = re.compile(
 
 
 def _expand_flattened_single_column_tables(value: str) -> str:
-    """Restore row breaks in flattened one-column Markdown tables.
-
-    The replacement is deliberately conservative: it requires a header row,
-    a one-cell ``---`` separator row, and at least one following pipe row. It
-    therefore repairs the IPE/ME/MME/URP/CSE/WRE pattern without guessing table
-    structure from ordinary prose or altering two-column tables with blanks.
-    """
+    """Restore row breaks in flattened one-column Markdown tables."""
     source = str(value or "")
 
     def replace_match(match: re.Match) -> str:
@@ -4210,9 +4243,6 @@ def _expand_flattened_single_column_tables(value: str) -> str:
         rows = [f"| {cell.strip()} |" for cell in row_cells]
         if not rows:
             return match.group(0)
-
-        # Surround the restored table with newlines so a department heading
-        # immediately before/after it remains outside the table.
         return (
             "\n"
             + match.group("header").strip()
@@ -4223,37 +4253,257 @@ def _expand_flattened_single_column_tables(value: str) -> str:
             + "\n"
         )
 
-    # ``re.sub`` is global, so every non-overlapping one-column table in the
-    # proposal is repaired in one pass. A repeated pass would keep matching an
-    # already-restored table and add unnecessary blank lines.
-    return _FLATTENED_SINGLE_COLUMN_TABLE_RE.sub(
-        replace_match,
-        source,
-    )
+    return _FLATTENED_SINGLE_COLUMN_TABLE_RE.sub(replace_match, source)
 
 
-def _render_html_table(header: list, rows: list) -> str:
-    """Render parsed table cells as compact, safe HTML.
+def _plain_table_text(value) -> str:
+    """Normalize a cell for table-shape comparison without changing output."""
+    text = re.sub(r"<[^>]+>", " ", str(value or ""))
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+    return re.sub(r"\s+", " ", text).strip()
 
-    Attributes are single-quoted so json.dumps never has to escape them, and
-    border='1' is included as a fallback for HTML sanitizers that strip
-    inline style attributes.
+
+def _header_expected_kind(value: str) -> str:
+    """Infer the broad value type suggested by a column heading."""
+    text = _plain_table_text(value).casefold()
+    if not text:
+        return "unknown"
+
+    if re.search(r"(?:letter\s*grade|লেটার\s*গ্রেড|গ্রেড\s*লেটার)", text):
+        return "grade"
+    if re.search(
+        r"(?:name|নাম|বিবরণ|description|remarks?|মন্তব্য|বিভাগ|department|"
+        r"faculty|অনুষদ|office|পদবী|designation)",
+        text,
+    ):
+        return "text"
+    if re.search(
+        r"(?:course\s*(?:no|number|code)|কোর্স\s*(?:নং|নম্বর)|student\s*(?:no|number)|"
+        r"স্টুডেন্ট\s*(?:নং|নম্বর)|roll\s*(?:no|number)|রোল\s*(?:নং|নম্বর))",
+        text,
+    ):
+        return "code"
+    if re.search(
+        r"(?:grade\s*point|গ্রেড\s*প[য়য়]েন্ট|marks?|নম্বর|শতকরা|percentage|%|"
+        r"credit|ক্রেডিট|serial|ক্রমিক|তারিখ|date|সময়|time|total|মোট|gpa|cgpa)",
+        text,
+    ) or re.search(r"\d", text):
+        return "numeric"
+    return "unknown"
+
+
+def _observed_cell_kind(value: str) -> str:
+    """Classify a data cell broadly for safe header/row alignment."""
+    text = _plain_table_text(value)
+    if not text:
+        return "empty"
+    compact = re.sub(r"\s+", "", text)
+
+    if re.fullmatch(r"(?:[-–—]|n/?a|null)", compact, flags=re.IGNORECASE):
+        return "numeric"
+    if re.fullmatch(r"(?:A\+?|A-|B\+?|B-|C\+?|C-|D\+?|D-|F|P|PASS|FAIL)", compact, flags=re.IGNORECASE):
+        return "grade"
+    if re.fullmatch(r"[০-৯0-9.,:+/%()\-–—]+", compact):
+        return "numeric"
+    if re.fullmatch(r"[A-Za-z]{1,12}[ ._-]*[০-৯0-9][A-Za-z০-৯0-9 ._/'-]*", compact):
+        return "code"
+    if re.fullmatch(r"[০-৯0-9]{4,}[A-Za-z]?", compact):
+        return "code"
+    return "text"
+
+
+def _kind_compatibility(expected: str, observed: str) -> float:
+    """Score how naturally a data kind fits under a header kind."""
+    if observed == "empty" or expected == "unknown":
+        return 0.0
+    scores = {
+        "text": {"text": 3.0, "code": 0.8, "numeric": -1.3, "grade": -1.8},
+        "numeric": {"numeric": 3.2, "code": 1.1, "grade": -1.0, "text": -2.0},
+        "grade": {"grade": 4.0, "text": -1.2, "numeric": -2.0, "code": -1.5},
+        "code": {"code": 3.2, "numeric": 1.0, "text": 0.2, "grade": -1.5},
+    }
+    return scores.get(expected, {}).get(observed, 0.0)
+
+
+def _column_kind(rows: list, column_index: int) -> str:
+    """Return the most common non-empty kind in one observed data column."""
+    counts = {}
+    for row in rows:
+        if column_index >= len(row):
+            continue
+        kind = _observed_cell_kind(row[column_index])
+        if kind == "empty":
+            continue
+        counts[kind] = counts.get(kind, 0) + 1
+    if not counts:
+        return "empty"
+    return max(counts, key=lambda kind: (counts[kind], kind == "text"))
+
+
+def _align_header_to_width(header: list, rows: list, target_width: int) -> list:
+    """Insert missing blank header cells without shifting or deleting data.
+
+    OCR/model output often omits an empty top-left heading. Dynamic alignment
+    places the surviving headings over the body columns whose value types fit
+    best. It can also recover a missing blank header in the middle or at right.
     """
-    column_count = len(header)
+    cells = list(header)
+    if target_width <= 0:
+        return cells
+    if len(cells) >= target_width:
+        return cells + [""] * (target_width - len(cells))
+
+    column_kinds = [_column_kind(rows, index) for index in range(target_width)]
+    count = len(cells)
+    neg_inf = float("-inf")
+    dp = [[neg_inf] * (target_width + 1) for _ in range(count + 1)]
+    choice = [[None] * (target_width + 1) for _ in range(count + 1)]
+    dp[0][0] = 0.0
+
+    for i in range(count + 1):
+        for j in range(target_width):
+            current = dp[i][j]
+            if current == neg_inf:
+                continue
+
+            # Leave this output column blank. A tiny penalty avoids unnecessary
+            # leading blanks when the evidence is tied.
+            skip_score = current - 0.08
+            if skip_score > dp[i][j + 1]:
+                dp[i][j + 1] = skip_score
+                choice[i][j + 1] = (i, j, "skip")
+
+            if i < count:
+                expected = _header_expected_kind(cells[i])
+                place_score = current + _kind_compatibility(expected, column_kinds[j])
+                # Prefer placing over skipping when scores are exactly tied.
+                if place_score >= dp[i + 1][j + 1]:
+                    dp[i + 1][j + 1] = place_score
+                    choice[i + 1][j + 1] = (i, j, "place")
+
+    aligned = [""] * target_width
+    i, j = count, target_width
+    while j > 0:
+        step = choice[i][j]
+        if step is None:
+            # Defensive fallback: preserve order and pad on the right.
+            return cells + [""] * (target_width - len(cells))
+        prev_i, prev_j, action = step
+        if action == "place":
+            aligned[j - 1] = cells[i - 1]
+        i, j = prev_i, prev_j
+    return aligned
+
+
+def _align_short_row_to_header(row: list, header: list) -> list:
+    """Insert omitted empty cells into a short row using header semantics."""
+    target_width = len(header)
+    cells = list(row)
+    if len(cells) >= target_width:
+        return cells + [""] * (target_width - len(cells))
+
+    count = len(cells)
+    neg_inf = float("-inf")
+    dp = [[neg_inf] * (target_width + 1) for _ in range(count + 1)]
+    choice = [[None] * (target_width + 1) for _ in range(count + 1)]
+    dp[0][0] = 0.0
+
+    for i in range(count + 1):
+        for j in range(target_width):
+            current = dp[i][j]
+            if current == neg_inf:
+                continue
+
+            skip_score = current - 0.08
+            if skip_score > dp[i][j + 1]:
+                dp[i][j + 1] = skip_score
+                choice[i][j + 1] = (i, j, "skip")
+
+            if i < count:
+                expected = _header_expected_kind(header[j])
+                observed = _observed_cell_kind(cells[i])
+                place_score = current + _kind_compatibility(expected, observed)
+                if place_score >= dp[i + 1][j + 1]:
+                    dp[i + 1][j + 1] = place_score
+                    choice[i + 1][j + 1] = (i, j, "place")
+
+    aligned = [""] * target_width
+    i, j = count, target_width
+    while j > 0:
+        step = choice[i][j]
+        if step is None:
+            return cells + [""] * (target_width - len(cells))
+        prev_i, prev_j, action = step
+        if action == "place":
+            aligned[j - 1] = cells[i - 1]
+        i, j = prev_i, prev_j
+    return aligned
+
+
+def _normalize_table_shape(header: list, rows: list, separator_width: int = 0):
+    """Return a rectangular table while preserving every extracted cell.
+
+    Width is based on the widest of the header, separator and all body rows.
+    No row is ever sliced. Missing cells are inserted as blanks and aligned by
+    broad column semantics when possible.
+    """
+    clean_header = list(header or [])
+    clean_rows = [list(row or []) for row in (rows or [])]
+    widths = [len(clean_header), int(separator_width or 0)]
+    widths.extend(len(row) for row in clean_rows)
+    target_width = max(widths or [0])
+    if target_width <= 0:
+        return [], []
+
+    # Use widest body rows as the most reliable column profiles.
+    profile_rows = [row for row in clean_rows if len(row) == target_width]
+    if not profile_rows:
+        profile_rows = [row + [""] * (target_width - len(row)) for row in clean_rows]
+
+    normalized_header = _align_header_to_width(
+        clean_header,
+        profile_rows,
+        target_width,
+    )
+    normalized_rows = [
+        _align_short_row_to_header(row, normalized_header)
+        if len(row) < target_width
+        else list(row)
+        for row in clean_rows
+    ]
+
+    # A table header repeated after a page break is structural, not a data row.
+    header_key = tuple(_plain_table_text(cell).casefold() for cell in normalized_header)
+    deduped_rows = []
+    for row in normalized_rows:
+        row_key = tuple(_plain_table_text(cell).casefold() for cell in row)
+        if any(header_key) and row_key == header_key:
+            continue
+        deduped_rows.append(row)
+
+    return normalized_header, deduped_rows
+
+
+def _render_html_table(header: list, rows: list, separator_width: int = 0) -> str:
+    """Render a safe rectangular HTML table without ever dropping a cell."""
+    normalized_header, normalized_rows = _normalize_table_shape(
+        header,
+        rows,
+        separator_width=separator_width,
+    )
+    if not normalized_header:
+        return ""
+
     header_html = "".join(
         f"<th style='border:1px solid #000;padding:6px;text-align:left;'>{_format_table_cell_html(cell)}</th>"
-        for cell in header
+        for cell in normalized_header
     )
 
     body_rows = []
-    for row in rows:
-        normalized_row = list(row[:column_count])
-        if len(normalized_row) < column_count:
-            normalized_row.extend([""] * (column_count - len(normalized_row)))
-
+    for row in normalized_rows:
         cells_html = "".join(
             f"<td style='border:1px solid #000;padding:6px;'>{_format_table_cell_html(cell)}</td>"
-            for cell in normalized_row
+            for cell in row
         )
         body_rows.append(f"<tr>{cells_html}</tr>")
 
@@ -4264,7 +4514,6 @@ def _render_html_table(header: list, rows: list) -> str:
         f"<tbody>{''.join(body_rows)}</tbody>"
         "</table>"
     )
-
 
 def _contains_generated_rich_html(value: str) -> bool:
     """Detect HTML already created by this local formatter."""
@@ -4329,6 +4578,9 @@ def convert_tables_and_lists_to_html(text):
             found_table = True
 
             header = _split_markdown_table_row(header_line)
+            separator_width = (
+                len(_split_markdown_table_row(next_line)) if has_separator else 0
+            )
             index += 2 if has_separator else 1  # skip separator only if present
             rows = []
 
@@ -4342,7 +4594,16 @@ def convert_tables_and_lists_to_html(text):
                 rows.append(_split_markdown_table_row(row_line))
                 index += 1
 
-            segments.append(("table", _render_html_table(header, rows)))
+            segments.append(
+                (
+                    "table",
+                    _render_html_table(
+                        header,
+                        rows,
+                        separator_width=separator_width,
+                    ),
+                )
+            )
             continue
 
         text_buffer.append(header_line)
