@@ -2206,6 +2206,7 @@ def ocr_consistency_report(text: str) -> list:
                 "kind": "affiliation",
                 "page": page_no if page_no == first_page else first_page,
                 "entries": [first_number, entry_number],
+                "labels": [first_label, entry_label],
                 "value": shown_line.strip(),
                 "message": (
                     f"\"{shown_line.strip()}\" appears under both \"{first_label}\" "
@@ -2280,84 +2281,146 @@ def ocr_consistency_report(text: str) -> list:
     return issues
 
 
-def page_entry_affiliations(text: str, page_no: int) -> dict:
-    """{entry number: affiliation line} as the main transcription read one page."""
-    out = {}
+_TRAILING_ROLE_WORD_RE = re.compile(
+    r"\s*(?:সদস্য(?:-সচিব)?|সভাপতি|চেয়ারম্যান|আমন্ত্রিত(?:\s+অতিথি)?|Member|Chairman)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_role_word(value: str) -> str:
+    return _TRAILING_ROLE_WORD_RE.sub("", str(value or "").strip()).strip(" ,;-")
+
+
+def _is_role_only_line(value: str) -> bool:
+    """True for a line holding nothing but সদস্য / সভাপতি etc."""
+    return not _strip_role_word(value)
+
+
+def page_entry_records(text: str, page_no: int) -> list:
+    """[{"number", "name", "affiliation"}] in printed order for ONE page.
+
+    Deliberately a LIST, never a dict keyed by entry number: numbering RESTARTS
+    in every section (সকল ডীন ১..৪, then সকল বিভাগীয় প্রধান ১..১৪, then each
+    department ১..n), so an entry number identifies nothing on its own — keying
+    by it silently overwrites every section with the next.
+
+    The affiliation is the first line beneath the name that is neither blank nor
+    a bare role word. সদস্য frequently occupies a line of its own and is NOT an
+    affiliation.
+    """
+    records = []
     markers = list(PAGE_MARKER_RE.finditer(text or ""))
     for i, marker in enumerate(markers):
         if int(marker.group(1)) != page_no:
             continue
-        end = markers[i + 1].start() if i + 1 < len(markers) else len(text)
-        lines = [l.strip() for l in text[marker.end():end].splitlines()]
+        end_pos = markers[i + 1].start() if i + 1 < len(markers) else len(text)
+        lines = [l.strip() for l in text[marker.end():end_pos].splitlines()]
         for j, line in enumerate(lines):
             m = _NUMBERED_ENTRY_RE.match(line)
             if not m:
                 continue
+            affiliation = ""
             for nxt in lines[j + 1:]:
-                if not nxt:
+                if not nxt or _is_role_only_line(nxt):
                     continue
                 if _NUMBERED_ENTRY_RE.match(nxt):
                     break
-                out[m.group(1)] = _ENTRY_TRAILING_ROLE_RE.sub("", nxt).strip()
+                affiliation = _strip_role_word(nxt)
                 break
+            records.append({
+                "number": m.group(1),
+                "name": _strip_role_word(m.group(2)),
+                "affiliation": affiliation,
+            })
         break
-    return out
+    return records
+
+
+def find_entry_affiliation(records: list, label: str) -> str:
+    """What the main transcription gave the entry whose NAME matches `label`."""
+    key = _audit_name_key(_audit_person_name(_strip_role_word(label)))
+    for record in records:
+        if _audit_name_key(_audit_person_name(record["name"])) == key:
+            return record["affiliation"]
+    return ""
 
 
 ATTENDEE_RECHECK_PROMPT = (
-    "This image is ONE page of a meeting-minutes attendee list. Do one narrow task and "
-    "nothing else.\n\n"
-    "For every numbered entry on the page, output one line in exactly this form:\n"
-    "  <the entry number exactly as printed><TAB><the affiliation line printed directly "
-    "beneath that entry's name, exactly as printed>\n\n"
-    "If an entry has no affiliation line beneath it, write the number, a TAB, and a "
-    "hyphen. Read each entry's affiliation from ITS OWN line: never copy a value from "
-    "the entry above or the entry below, and never adjust one to match another. Two "
-    "ordinary members may share a department, but a faculty has only one ডীন and a "
-    "department only one প্রধান. Output only these lines — no heading, no page marker, "
-    "no commentary, no explanation."
+    "This image is ONE page of a meeting-minutes attendee list. Answer one narrow "
+    "question and nothing else.\n\n"
+    "For EACH name listed at the end of this message, find that person's entry on the "
+    "page and output exactly one line:\n"
+    "  <the person's name as printed><TAB><the affiliation line printed directly "
+    "beneath that name, exactly as printed>\n\n"
+    "The role word printed to the right of a name (সদস্য, সভাপতি) is NOT an "
+    "affiliation — ignore it. An affiliation reads like 'ডীন, ... অনুষদ' or "
+    "'প্রধান, ... বিভাগ' and sits on the line below the name. Read it from that "
+    "entry's OWN line: never copy it from the entry above or below, and never adjust "
+    "one so that it matches the other. If a name genuinely has no affiliation line "
+    "beneath it, write the name, a TAB, and a hyphen. Output only these lines — no "
+    "heading, no commentary.\n\nNames:\n"
 )
 
 
-def recheck_page_affiliations(
+def recheck_entry_affiliations(
     page_pdf_bytes: bytes,
+    labels: list,
     key_pool: "APIKeyPool",
     model_name: str,
     dpi: int,
     preprocess: str,
 ) -> dict:
-    """Ask ONE narrow question about ONE page: which affiliation belongs to which
-    entry? A short, single-purpose request is a materially easier task than
-    transcribing several pages, so it makes an independent second opinion
-    exactly where the audit found an impossible duplicate."""
+    """Ask about the two conflicting entries BY NAME, on their own page.
+
+    Names are unique on a page; entry numbers are not. Asking only "what is
+    printed beneath these two names?" is also a far smaller task than
+    transcribing the page, so it is answered without generating the surrounding
+    text that produced the copy. Returns {name key: affiliation}.
+    """
     images = render_chunk_page_images(page_pdf_bytes, dpi, preprocess)
-    if not images:
+    wanted = [_strip_role_word(l) for l in (labels or []) if str(l or "").strip()]
+    if not images or not wanted:
         return {}
+    prompt = ATTENDEE_RECHECK_PROMPT + "\n".join(f"- {name}" for name in wanted)
+
     api_key = key_pool.current_key()
     key_pool.wait(api_key)
     if NEW_SDK:
-        parts = [genai_types.Part.from_bytes(data=images[0],
-                                             mime_type=_image_mime(images[0]))]
         response = get_new_client(api_key).models.generate_content(
             model=model_name,
-            contents=[ATTENDEE_RECHECK_PROMPT] + parts,
-            config=new_sdk_config(temperature=0.0,
-                                  _thinking_level=OCR_THINKING_LEVEL),
+            contents=[
+                prompt,
+                genai_types.Part.from_bytes(
+                    data=images[0], mime_type=_image_mime(images[0])
+                ),
+            ],
+            config=new_sdk_config(
+                temperature=0.0, _thinking_level=OCR_THINKING_LEVEL
+            ),
         )
     else:
         response = get_legacy_model(api_key, model_name).generate_content(
-            [ATTENDEE_RECHECK_PROMPT,
-             {"mime_type": _image_mime(images[0]), "data": images[0]}],
+            [prompt, {"mime_type": _image_mime(images[0]), "data": images[0]}],
             generation_config={"temperature": 0.0},
         )
     key_pool.record_success(api_key)
+
     out = {}
     for line in (response.text or "").splitlines():
-        m = re.match(r"^\s*([০-৯0-9]+)\s*[।\.\):]?\s*[\t|]\s*(.+?)\s*$", line)
-        if not m:
-            m = re.match(r"^\s*([০-৯0-9]+)\s*[।\.\):]\s+(.+?)\s*$", line)
-        if m:
-            out[m.group(1)] = clean_bengali_ocr_text(m.group(2))
+        if "\t" in line:
+            name, _, affiliation = line.partition("\t")
+        else:
+            spaced = re.match(r"^\s*(.+?)\s{2,}(.+?)\s*$", line)
+            if not spaced:
+                continue
+            name, affiliation = spaced.group(1), spaced.group(2)
+        name = clean_bengali_ocr_text(_strip_role_word(name.strip(" -•*")))
+        affiliation = clean_bengali_ocr_text(affiliation.strip())
+        if not name:
+            continue
+        out[_audit_name_key(_audit_person_name(name))] = (
+            "" if affiliation in {"-", "—", "–"} else affiliation
+        )
     return out
 
 
@@ -2769,29 +2832,25 @@ if uploaded_pdf is not None:
                 "been copied from a neighbouring entry. Each affected page is being "
                 "re-read below with a single narrow question as a second opinion."
             )
-            # FOCUSED SECOND OPINION — one extra request per affected page.
+            # FOCUSED SECOND OPINION — one extra request per flagged conflict.
             # A repeated ডীন/প্রধান affiliation is logically impossible, so it is
-            # worth re-reading that page while asking ONLY "which affiliation
-            # belongs to which entry?". Transcribing several pages and answering
-            # one narrow question about one page are very different tasks; the
-            # narrow one is answered without the surrounding text that produced
-            # the copy. Nothing is edited automatically — both readings are
-            # shown and a human decides.
-            recheck_pages = sorted(
-                {
-                    issue["page"]
-                    for issue in consistency_issues
-                    if issue["kind"] == "affiliation" and issue.get("page")
-                }
-            )
-            for page_no in recheck_pages:
+            # worth re-reading that page while asking only "what is printed
+            # beneath these two NAMES?". Names are unique on a page; entry
+            # numbers are not, because numbering restarts in every section.
+            # Nothing is edited automatically — both readings are shown.
+            for issue in consistency_issues:
+                if issue["kind"] != "affiliation" or not issue.get("page"):
+                    continue
+                page_no = issue["page"]
+                labels = issue.get("labels") or []
                 try:
                     with st.spinner(
-                        f"Re-reading page {page_no} with one narrow question..."
+                        f"Re-reading page {page_no} — one narrow question..."
                     ):
-                        fresh = recheck_page_affiliations(
+                        fresh = recheck_entry_affiliations(
                             extract_single_page_pdf(uploaded_pdf_bytes, page_no),
-                            key_pool, model_name, int(ocr_dpi), preprocess_profile,
+                            labels, key_pool, model_name,
+                            int(ocr_dpi), preprocess_profile,
                         )
                 except Exception as recheck_error:
                     st.caption(
@@ -2800,34 +2859,56 @@ if uploaded_pdf is not None:
                     )
                     continue
 
-                original = page_entry_affiliations(combined, page_no)
-                disagreements = [
-                    (entry, original[entry], fresh[entry])
-                    for entry in original
-                    if entry in fresh
-                    and _affiliation_key(original[entry]) != _affiliation_key(fresh[entry])
+                records = page_entry_records(combined, page_no)
+                rows = []
+                for label in labels:
+                    key = _audit_name_key(_audit_person_name(_strip_role_word(label)))
+                    rows.append((
+                        _strip_role_word(label),
+                        find_entry_affiliation(records, label),
+                        fresh.get(key),
+                    ))
+                answered = [row for row in rows if row[2] is not None]
+                changed = [
+                    row for row in answered
+                    if _affiliation_key(row[1]) != _affiliation_key(row[2])
                 ]
-                if disagreements:
+
+                if changed:
                     st.warning(
-                        f"🔍 A focused re-read of page {page_no} disagrees with the main "
-                        f"transcription on {len(disagreements)} entry(ies). It saw only "
-                        "this page and was asked only this one question, so where the two "
+                        f"🔍 A focused re-read of page {page_no} disagrees on "
+                        f"{len(changed)} of these {len(rows)} entries. It saw only this "
+                        "page and was asked only this one question, so where the two "
                         "differ the re-read is usually the better reading — confirm "
-                        "against the scan before you edit the text."
+                        "against the scan before editing the text."
                     )
-                    with st.expander(f"Page {page_no} — the two readings", expanded=True):
-                        for entry, was, now in disagreements:
-                            st.markdown(
-                                f"**Entry {entry}**\n\n"
-                                f"- main transcription: `{was}`\n"
-                                f"- focused re-read: `{now}`"
-                            )
-                elif fresh:
+                elif answered:
+                    st.info(
+                        f"🔍 A focused re-read of page {page_no} agrees with the main "
+                        "transcription for both entries — the repeated value may "
+                        "genuinely be printed that way. Check the scan."
+                    )
+                else:
                     st.caption(
-                        f"Focused re-read of page {page_no} agrees with the main "
-                        "transcription on every entry it could read — the repeated value "
-                        "may genuinely be printed that way. Check the scan."
+                        f"Focused re-read of page {page_no} could not locate these "
+                        "entries by name — check that page manually."
                     )
+
+                if answered:
+                    with st.expander(
+                        f"Page {page_no} — both readings", expanded=bool(changed)
+                    ):
+                        for name, was, now in rows:
+                            differs = (
+                                now is not None
+                                and _affiliation_key(was) != _affiliation_key(now)
+                            )
+                            st.markdown(
+                                f"**{name}**\n\n"
+                                f"- main transcription: `{was or '—'}`\n"
+                                f"- focused re-read: `{now or '—'}`"
+                                + ("  ⟵ **differs**" if differs else "")
+                            )
 
             with st.expander("Show the lines to check", expanded=False):
                 with scroll_box(300):
