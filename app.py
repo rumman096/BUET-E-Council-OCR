@@ -2766,14 +2766,9 @@ if uploaded_pdf is not None:
         if consistency_issues:
             st.warning(
                 f"⚠️ {len(consistency_issues)} attendee line(s) look like they may have "
-                "been copied from a neighbouring entry. Worth a quick check."
+                "been copied from a neighbouring entry. Each affected page is being "
+                "re-read below with a single narrow question as a second opinion."
             )
-            with st.expander("Show the lines to check", expanded=False):
-                with scroll_box(300):
-                    st.markdown(
-                        "- " + "\n- ".join(i["message"] for i in consistency_issues)
-                    )
-
             # FOCUSED SECOND OPINION — one extra request per affected page.
             # A repeated ডীন/প্রধান affiliation is logically impossible, so it is
             # worth re-reading that page while asking ONLY "which affiliation
@@ -2832,6 +2827,12 @@ if uploaded_pdf is not None:
                         f"Focused re-read of page {page_no} agrees with the main "
                         "transcription on every entry it could read — the repeated value "
                         "may genuinely be printed that way. Check the scan."
+                    )
+
+            with st.expander("Show the lines to check", expanded=False):
+                with scroll_box(300):
+                    st.markdown(
+                        "- " + "\n- ".join(i["message"] for i in consistency_issues)
                     )
 
         # Page-boundary audit: catches an item number lost in a damaged margin
