@@ -3644,22 +3644,134 @@ def _agenda_uses_proposal_numbers(agenda: list) -> bool:
     return numbered >= 2 and numbered >= len(agenda or []) // 2
 
 
+def _normalize_overlap_text(value: str) -> str:
+    """Normalize text only for overlap comparison, never for saved output.
+
+    The original proposal text is always preserved. This comparison form merely
+    ignores harmless differences in whitespace, HTML wrappers and letter case so
+    the same overlapped page can be recognized when two Gemini chunks format it
+    slightly differently.
+    """
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    normalized = re.sub(r"<[^>]+>", " ", normalized)
+    normalized = html.unescape(normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip().casefold()
+    return normalized
+
+
+def _overlap_matches(previous_normalized: str, candidate_normalized: str) -> bool:
+    """Return True when candidate is already represented at the previous end."""
+    if not candidate_normalized:
+        return True
+
+    # An exact repeated ending is safe to remove even when it is short. Do not
+    # remove a short phrase merely because the same common words appeared
+    # somewhere earlier in the proposal.
+    if previous_normalized.endswith(candidate_normalized):
+        return True
+
+    # Avoid treating a very short, common phrase as a duplicated page block.
+    if len(candidate_normalized) < 120:
+        return False
+
+    if candidate_normalized in previous_normalized:
+        return True
+
+    suffix = previous_normalized[-len(candidate_normalized):]
+    if not suffix:
+        return False
+
+    # Two extractions of the same overlapped page may differ by a character or
+    # two (for example ধাতব vs धাতব) or by harmless spacing. A high fuzzy ratio
+    # removes that duplicate without discarding genuinely different content.
+    similarity = SequenceMatcher(
+        None,
+        suffix,
+        candidate_normalized,
+        autojunk=False,
+    ).ratio()
+    return similarity >= 0.97
+
+
+def _continuation_cut_points(text: str) -> list:
+    """Return safe raw-text boundaries for trimming a duplicated prefix.
+
+    Most continuation blocks preserve line or paragraph boundaries. HTML closing
+    tags are included too so manually supplied/generated rich text is handled
+    safely. The returned offsets refer to the original string, preserving every
+    character in any genuinely new tail.
+    """
+    points = {len(text)}
+    for match in re.finditer(r"\n+", text):
+        points.add(match.end())
+    for match in re.finditer(
+        r"</(?:p|table|div|ol|ul)>\s*",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        points.add(match.end())
+    return sorted(points, reverse=True)
+
+
+def _append_unique_continuation(previous_text: str, continuation_text: str):
+    """Append only the new part of a page/chunk continuation.
+
+    Returns ``(combined_text, action)`` where action is one of:
+      - ``duplicate``: the overlap was already present and nothing was appended;
+      - ``trimmed``: a repeated prefix was removed and only its new tail appended;
+      - ``appended``: no overlap was found, so the full continuation was appended;
+      - ``empty``: the continuation had no text.
+
+    This keeps the deliberate one-page overlap (which protects proposals from
+    being split) while preventing that overlap from appearing twice in JSON.
+    """
+    previous = str(previous_text or "").rstrip()
+    continuation = str(continuation_text or "").strip()
+
+    if not continuation:
+        return previous, "empty"
+    if not previous:
+        return continuation, "appended"
+
+    previous_normalized = _normalize_overlap_text(previous)
+    continuation_normalized = _normalize_overlap_text(continuation)
+
+    # The whole headless block is already at the end of the numbered proposal.
+    if _overlap_matches(previous_normalized, continuation_normalized):
+        return previous, "duplicate"
+
+    # Sometimes the repeated page is followed by genuinely new text. Find the
+    # longest duplicated prefix and append only the remaining tail, so no part of
+    # the proposal is lost and no page is repeated.
+    for cut_point in _continuation_cut_points(continuation):
+        if cut_point >= len(continuation):
+            continue
+        prefix = continuation[:cut_point].rstrip()
+        prefix_normalized = _normalize_overlap_text(prefix)
+        if not _overlap_matches(previous_normalized, prefix_normalized):
+            continue
+
+        new_tail = continuation[cut_point:].lstrip()
+        if not new_tail:
+            return previous, "duplicate"
+        return (previous + "\n\n" + new_tail).strip(), "trimmed"
+
+    # No duplicated overlap was detected. This is a genuine continuation and is
+    # appended in full, ensuring the proposal remains one agenda entry.
+    return (previous + "\n\n" + continuation).strip(), "appended"
+
+
 def stitch_split_agenda_items(meeting: dict):
-    """Re-join a proposal that was split across a page or chunk boundary.
+    """Re-join proposals split across page or JSON-chunk boundaries safely.
 
-    In the modern format every agenda entry starts with "প্রস্তাব নং ...".
-    When a proposal's tables or trailing paragraphs continue onto the next
-    page, the model sometimes emits that continuation as a SEPARATE entry with
-    no proposal number at all — which is how প্রস্তাব নং এ ১৪০১০৬৫ came back as
-    two agenda items, the second one headless.
+    Modern minutes require every independent agenda item to begin with
+    ``প্রস্তাব নং``. A headless item is therefore a continuation of the preceding
+    proposal. It is always folded back into that proposal, but duplicated text
+    from the deliberate one-page overlap is removed first. Any genuinely new
+    tail is preserved and appended.
 
-    Any entry without its own proposal heading is therefore folded back into
-    the entry above it: body appended, resolution carried over. Purely local
-    and deterministic, so it costs nothing and cannot invent text. Old-format
-    minutes (numbered সিদ্ধান্তাবলী items, English RESOLUTIONS) are left alone,
-    because there every item legitimately lacks a proposal number.
-
-    Returns (meeting, notes) where notes describes each re-join for the UI.
+    Old-format minutes without proposal numbers remain untouched. Returns
+    ``(meeting, notes)`` for the Streamlit status message.
     """
     result = dict(meeting or {})
     agenda = [dict(item or {}) for item in (result.get("agenda") or [])]
@@ -3668,38 +3780,72 @@ def stitch_split_agenda_items(meeting: dict):
 
     stitched = []
     notes = []
+    pending_leading = []
+
     for item in agenda:
         body = (item.get("body") or "").strip()
-        if (
-            not stitched
-            or _PROPOSAL_HEAD_RE.search(body[:200])
-            or _STANDALONE_SECTION_RE.match(body)
-        ):
+        starts_proposal = bool(_PROPOSAL_HEAD_RE.search(body[:200]))
+        standalone = bool(_STANDALONE_SECTION_RE.match(body))
+
+        if starts_proposal or standalone:
+            # A full document normally cannot begin with a headless block. Keep
+            # such a rare block pending rather than dropping it; when possible it
+            # will be attached to the preceding numbered proposal below.
+            if pending_leading and stitched:
+                for orphan in pending_leading:
+                    combined, _ = _append_unique_continuation(
+                        stitched[-1].get("body"),
+                        orphan.get("body"),
+                    )
+                    stitched[-1]["body"] = combined
+                pending_leading.clear()
             stitched.append(item)
+            continue
+
+        if not stitched:
+            pending_leading.append(item)
             continue
 
         previous = stitched[-1]
         previous_body = (previous.get("body") or "").rstrip()
-        if body:
-            previous["body"] = (previous_body + "\n\n" + body).strip()
+        combined_body, body_action = _append_unique_continuation(
+            previous_body,
+            body,
+        )
+        previous["body"] = combined_body
 
         previous_resolution = (previous.get("resolution") or "").strip()
         resolution = (item.get("resolution") or "").strip()
-        if resolution and resolution not in previous_resolution:
-            previous["resolution"] = (
-                (previous_resolution + "\n\n" + resolution).strip()
-                if previous_resolution
-                else resolution
+        if resolution:
+            combined_resolution, _ = _append_unique_continuation(
+                previous_resolution,
+                resolution,
             )
+            previous["resolution"] = combined_resolution
 
         heading = re.search(
             r"প্রস্তাব\s*নং[^\n:ঃ]{0,28}", previous.get("body") or ""
         )
         label = (heading.group(0) if heading else previous_body[:40]).strip()
         snippet = re.sub(r"\s+", " ", body).strip()[:45]
-        notes.append(
-            f'a continuation block starting "{snippet}…" was re-joined to "{label}…"'
-        )
+
+        if body_action == "duplicate":
+            notes.append(
+                f'duplicate overlap starting "{snippet}…" was removed from "{label}…"'
+            )
+        elif body_action == "trimmed":
+            notes.append(
+                f'a repeated prefix was removed and the new continuation was joined to "{label}…"'
+            )
+        else:
+            notes.append(
+                f'a continuation block starting "{snippet}…" was joined to "{label}…"'
+            )
+
+    # Preserve any exceptional leading text rather than losing it. This only
+    # applies to malformed/incomplete input that begins midway through a proposal.
+    if pending_leading:
+        stitched = pending_leading + stitched
 
     for position, item in enumerate(stitched, 1):
         item["serial"] = position
@@ -4494,8 +4640,8 @@ if st.button(
 
         if stitch_notes:
             st.info(
-                f"🔧 {len(stitch_notes)} agenda item(s) that ran across a page break "
-                "were joined back together."
+                f"🔧 {len(stitch_notes)} page-boundary continuation(s) were handled: "
+                "split proposal text was rejoined and repeated overlap was removed."
             )
 
         if applied_corrections:
