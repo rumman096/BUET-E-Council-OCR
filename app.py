@@ -2597,6 +2597,8 @@ if uploaded_pdf is not None:
 
         remember_exhausted_keys(key_pool)
         st.session_state["ocr_result"] = combined
+        # Keep the editable preview synchronized with the newly completed OCR.
+        st.session_state["ocr_editor"] = combined
         st.session_state["ocr_filename"] = uploaded_pdf.name.rsplit(".", 1)[0]
 
 # ==========================================
@@ -2619,16 +2621,40 @@ if "ocr_result" in st.session_state:
         mime="text/markdown",
     )
     with st.expander("Preview extracted text", expanded=False):
-        ocr_preview_text = st.session_state["ocr_result"]
+        # Older saved sessions may have an OCR result but no editor state yet.
+        if "ocr_editor" not in st.session_state:
+            st.session_state["ocr_editor"] = st.session_state["ocr_result"]
+
         st.caption(
-            f"{len(ocr_preview_text):,} characters — scroll inside the box below. "
+            f"{len(st.session_state['ocr_editor']):,} characters — "
+            "edit the text below, then press Apply edits. "
             "Drag its bottom-right corner to make it taller."
         )
         st.text_area(
             "Combined OCR output",
-            ocr_preview_text,
             height=400,
+            key="ocr_editor",
         )
+
+        if st.button(
+            "✅ Apply edits",
+            key="apply_ocr_edits",
+            type="primary",
+        ):
+            st.session_state["ocr_result"] = st.session_state["ocr_editor"]
+
+            # Any existing JSON belongs to the text before this edit. Clear only
+            # the JSON-stage cache so the next record uses the corrected text.
+            for state_key in (
+                "json_job_key",
+                "json_partials_done",
+                "json_job_complete",
+                "json_result",
+            ):
+                st.session_state.pop(state_key, None)
+
+            st.success("Edits applied. Step 2 will use the corrected text.")
+            st.rerun()
 
 # ============================================================
 # STAGE 2 (TAILORED): OCR TEXT → MEETING-MINUTES JSON
