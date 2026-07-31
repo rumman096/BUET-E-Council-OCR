@@ -1193,6 +1193,16 @@ with st.sidebar:
                 "and cheaper. Changing the document type above resets this."
             ),
         )
+        recheck_conflicts = st.checkbox(
+            "Double-check flagged attendee lines",
+            value=True,
+            help=(
+                "When the audit finds an impossible duplicate — two ডীন sharing one "
+                "অনুষদ — re-read that page with one narrow question as a second "
+                "opinion. Costs ONE extra request per affected page, and only when a "
+                "conflict is actually found. Turn it off to save quota."
+            ),
+        )
         use_text_layer = st.checkbox(
             "Use embedded PDF text when available",
             value=True,
@@ -2345,6 +2355,45 @@ def find_entry_affiliation(records: list, label: str) -> str:
     return ""
 
 
+def apply_affiliation_correction(
+    text: str, page_no: int, name: str, new_value: str
+):
+    """Replace ONE attendee's affiliation line on ONE page. Returns (text, ok).
+
+    The line is located exactly the way page_entry_records finds it — the first
+    line beneath the matching NAME that is neither blank nor a bare role word —
+    so what gets rewritten is precisely what was shown in the comparison.
+    Original indentation is preserved and nothing else in the transcription is
+    touched. Returns ok=False rather than guessing if the line cannot be found.
+    """
+    markers = list(PAGE_MARKER_RE.finditer(text or ""))
+    target = _audit_name_key(_audit_person_name(_strip_role_word(name)))
+    for i, marker in enumerate(markers):
+        if int(marker.group(1)) != page_no:
+            continue
+        end = markers[i + 1].start() if i + 1 < len(markers) else len(text)
+        head, body, tail = text[: marker.end()], text[marker.end():end], text[end:]
+        lines = body.split("\n")
+        for j, line in enumerate(lines):
+            m = _NUMBERED_ENTRY_RE.match(line.strip())
+            if not m:
+                continue
+            found = _audit_name_key(_audit_person_name(_strip_role_word(m.group(2))))
+            if found != target:
+                continue
+            for k in range(j + 1, len(lines)):
+                candidate = lines[k].strip()
+                if not candidate or _is_role_only_line(candidate):
+                    continue
+                if _NUMBERED_ENTRY_RE.match(candidate):
+                    break
+                indent = lines[k][: len(lines[k]) - len(lines[k].lstrip())]
+                lines[k] = indent + new_value
+                return head + "\n".join(lines) + tail, True
+            break
+    return text, False
+
+
 ATTENDEE_RECHECK_PROMPT = (
     "This image is ONE page of a meeting-minutes attendee list. Answer one narrow "
     "question and nothing else.\n\n"
@@ -2642,6 +2691,8 @@ if uploaded_pdf is not None:
             st.session_state["job_key"] = job_key
             st.session_state["chunks_done"] = {}
             st.session_state["job_complete"] = False
+            st.session_state["affiliation_reviews"] = []
+            st.session_state["applied_affiliation_fixes"] = []
 
         chunks_done = st.session_state["chunks_done"]
 
@@ -2832,20 +2883,48 @@ if uploaded_pdf is not None:
                 "been copied from a neighbouring entry. Each affected page is being "
                 "re-read below with a single narrow question as a second opinion."
             )
-            # FOCUSED SECOND OPINION — one extra request per flagged conflict.
-            # A repeated ডীন/প্রধান affiliation is logically impossible, so it is
-            # worth re-reading that page while asking only "what is printed
-            # beneath these two NAMES?". Names are unique on a page; entry
-            # numbers are not, because numbering restarts in every section.
-            # Nothing is edited automatically — both readings are shown.
+            # FOCUSED SECOND OPINION — one extra request per affected PAGE, and
+            # only when the audit found an impossible duplicate. A repeated
+            # ডীন/প্রধান affiliation cannot be right, so that page is re-read
+            # while asking only "what is printed beneath these NAMES?". Names are
+            # unique on a page; entry numbers are not, since numbering restarts
+            # in every section.
+            #
+            # Results go into session state rather than only being drawn: this
+            # block lives inside `if st.button(...)`, so it does not re-execute
+            # on the rerun that a later Apply click causes.
+            st.session_state["affiliation_reviews"] = []
+
+            # Group conflicts BY PAGE first. A page with three conflicts is still
+            # one page: asking about every involved name in a single request
+            # costs one call instead of three, which matters on a free tier where
+            # the daily request count is the binding limit.
+            conflicts_by_page = {}
             for issue in consistency_issues:
                 if issue["kind"] != "affiliation" or not issue.get("page"):
                     continue
-                page_no = issue["page"]
-                labels = issue.get("labels") or []
+                conflicts_by_page.setdefault(issue["page"], []).extend(
+                    issue.get("labels") or []
+                )
+            if conflicts_by_page and not recheck_conflicts:
+                st.caption(
+                    "Double-checking flagged attendee lines is switched off in "
+                    "Advanced settings — no extra request was made."
+                )
+
+            for page_no, raw_labels in sorted(conflicts_by_page.items()):
+                if not recheck_conflicts:
+                    break
+                labels, seen_names = [], set()
+                for label in raw_labels:
+                    key = _audit_name_key(_audit_person_name(_strip_role_word(label)))
+                    if key and key not in seen_names:
+                        seen_names.add(key)
+                        labels.append(label)
                 try:
                     with st.spinner(
-                        f"Re-reading page {page_no} — one narrow question..."
+                        f"Re-reading page {page_no} — one narrow question about "
+                        f"{len(labels)} name(s)..."
                     ):
                         fresh = recheck_entry_affiliations(
                             extract_single_page_pdf(uploaded_pdf_bytes, page_no),
@@ -2860,55 +2939,38 @@ if uploaded_pdf is not None:
                     continue
 
                 records = page_entry_records(combined, page_no)
-                rows = []
                 for label in labels:
                     key = _audit_name_key(_audit_person_name(_strip_role_word(label)))
-                    rows.append((
-                        _strip_role_word(label),
-                        find_entry_affiliation(records, label),
-                        fresh.get(key),
-                    ))
-                answered = [row for row in rows if row[2] is not None]
-                changed = [
-                    row for row in answered
-                    if _affiliation_key(row[1]) != _affiliation_key(row[2])
-                ]
+                    reread_value = fresh.get(key)
+                    if reread_value is None:
+                        continue
+                    main_value = find_entry_affiliation(records, label)
+                    st.session_state["affiliation_reviews"].append({
+                        "page": page_no,
+                        "name": _strip_role_word(label),
+                        "main": main_value,
+                        "reread": reread_value,
+                        "differs": (
+                            _affiliation_key(main_value)
+                            != _affiliation_key(reread_value)
+                        ),
+                        "applied": False,
+                    })
 
-                if changed:
-                    st.warning(
-                        f"🔍 A focused re-read of page {page_no} disagrees on "
-                        f"{len(changed)} of these {len(rows)} entries. It saw only this "
-                        "page and was asked only this one question, so where the two "
-                        "differ the re-read is usually the better reading — confirm "
-                        "against the scan before editing the text."
-                    )
-                elif answered:
-                    st.info(
-                        f"🔍 A focused re-read of page {page_no} agrees with the main "
-                        "transcription for both entries — the repeated value may "
-                        "genuinely be printed that way. Check the scan."
-                    )
-                else:
-                    st.caption(
-                        f"Focused re-read of page {page_no} could not locate these "
-                        "entries by name — check that page manually."
-                    )
-
-                if answered:
-                    with st.expander(
-                        f"Page {page_no} — both readings", expanded=bool(changed)
-                    ):
-                        for name, was, now in rows:
-                            differs = (
-                                now is not None
-                                and _affiliation_key(was) != _affiliation_key(now)
-                            )
-                            st.markdown(
-                                f"**{name}**\n\n"
-                                f"- main transcription: `{was or '—'}`\n"
-                                f"- focused re-read: `{now or '—'}`"
-                                + ("  ⟵ **differs**" if differs else "")
-                            )
+            _reviews = st.session_state.get("affiliation_reviews") or []
+            _differing = [r for r in _reviews if r["differs"]]
+            if _differing:
+                st.warning(
+                    f"🔍 A focused re-read disagrees with the main transcription on "
+                    f"{len(_differing)} entry(ies). Both readings — and a one-click "
+                    "correction — are in the OCR result section below."
+                )
+            elif _reviews:
+                st.info(
+                    "🔍 The focused re-read agrees with the main transcription for "
+                    "every flagged entry — the repeated value may genuinely be printed "
+                    "that way. Check the scan."
+                )
 
             with st.expander("Show the lines to check", expanded=False):
                 with scroll_box(300):
@@ -2988,6 +3050,64 @@ if uploaded_pdf is not None:
 if "ocr_result" in st.session_state:
     st.divider()
     st.subheader("✅ OCR result")
+
+    # ---- Suggested corrections from the focused re-read -------------------
+    # Rendered OUTSIDE the "Read the document" button block, from session
+    # state, so the Apply buttons survive the rerun a click triggers. Each
+    # click rewrites exactly one affiliation line and nothing else.
+    _reviews = st.session_state.get("affiliation_reviews") or []
+    _differing = [r for r in _reviews if r["differs"]]
+    if _differing:
+        st.markdown(
+            "<div class='ec-help'>A focused re-read of the flagged page disagreed "
+            "with the main transcription. Check each one against the scan, then "
+            "apply the ones that are right — only that single line changes.</div>",
+            unsafe_allow_html=True,
+        )
+        for _index, _review in enumerate(_reviews):
+            if not _review["differs"]:
+                continue
+            _left, _right = st.columns([6, 1])
+            _left.markdown(
+                f"**{_review['name']}** · page {_review['page']}\n\n"
+                f"- main transcription: `{_review['main'] or '—'}`\n"
+                f"- focused re-read: `{_review['reread'] or '—'}`"
+            )
+            if _review["applied"]:
+                _right.success("applied")
+            elif _right.button("Apply", key=f"apply_affiliation_{_index}"):
+                _patched, _ok = apply_affiliation_correction(
+                    st.session_state["ocr_result"],
+                    _review["page"],
+                    _review["name"],
+                    _review["reread"],
+                )
+                if _ok:
+                    st.session_state["ocr_result"] = _patched
+                    _review["applied"] = True
+                    st.session_state.setdefault(
+                        "applied_affiliation_fixes", []
+                    ).append(
+                        f"page {_review['page']} · {_review['name']}: "
+                        f"{_review['main'] or '—'} → {_review['reread']}"
+                    )
+                    st.rerun()
+                else:
+                    _right.error("not found")
+        _outstanding = [r for r in _differing if not r["applied"]]
+        if _outstanding:
+            st.caption(
+                f"{len(_outstanding)} suggested correction(s) not applied yet. "
+                "The download below reflects whatever you have applied."
+            )
+
+    _applied_fixes = st.session_state.get("applied_affiliation_fixes") or []
+    if _applied_fixes:
+        st.success(
+            f"{len(_applied_fixes)} correction(s) applied to the text below:\n\n- "
+            + "\n- ".join(_applied_fixes)
+        )
+
     base_name = st.session_state.get("ocr_filename", "ocr_output")
     st.download_button(
         "Download extracted text (.txt)",
