@@ -2168,6 +2168,13 @@ def _consistency_key(role: str, affiliation: str):
     return role, affil
 
 
+# A duplicate AFFILIATION is logically impossible (one ডীন per অনুষদ), so it is
+# always reported. A duplicate NAME is not: the 463rd minutes genuinely list
+# অধ্যাপক ডঃ মোঃ মনিরুল ইসলাম at CSE entries ৩ and ৯ — two different people.
+# Copying, by contrast, lands on a NEIGHBOURING line, so only a near-adjacent
+# repeat is worth a human's attention.
+NAME_REPEAT_MAX_GAP = 2
+
 def _affiliation_key(value: str) -> str:
     """Punctuation/space-insensitive form, for comparing two readings."""
     return _consistency_key("প্রধান", value or "")[1]
