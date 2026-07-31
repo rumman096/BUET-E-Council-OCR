@@ -123,11 +123,9 @@ PROMPT_NON_NEGOTIABLE = (
     "you are transcribing right now. Never let any of the following change a character: another "
     "entry, another page, the same word written elsewhere in the document, how common a spelling "
     "is, what would make a list look consistent, what a similar document usually says, or your own "
-    "knowledge of Bengali names, departments and places. Do not compare entries against each "
-    "other in EITHER direction. Never change a value so that two entries agree. Never carry a value "
-    "FORWARD from the entry above, and never pull a value BACKWARD from the entry below — a "
-    "neighbouring line is not evidence about this line, whichever side it sits on. Every entry is "
-    "decided only by its own printed lines. This single rule prevents most serious errors.",
+    "knowledge of Bengali names, departments and places. Two adjacent entries that come out "
+    "looking identical is a normal and acceptable result — consistency is never a reason to alter "
+    "a letter. This single rule prevents most serious errors.",
 
     "\n\nN2. NAMES ARE COPIED GLYPH BY GLYPH. A person's name has no 'correct' form other than the "
     "one printed. Never regularize a name toward a more familiar or more frequent spelling, never "
@@ -165,29 +163,24 @@ PROMPT_NON_NEGOTIABLE = (
 )
 
 PROMPT_EXAMPLE = (
-    "\n\n=== WORKED EXAMPLE — FORMAT ONLY ==="
-    "\nEverything in «guillemets» below is a PLACEHOLDER. These are not real names, departments "
-    "or faculties, they must NEVER appear in your output, and nothing in them tells you anything "
-    "about the document you are reading. The example teaches SHAPE, not content."
+    "\n\n=== WORKED EXAMPLE (shows the required format — never copy this content) ==="
     "\nA page printing this attendee list:"
-    "\n     ৩। অধ্যাপক ডঃ «নাম-এক»              সদস্য"
-    "\n        প্রধান, «বিভাগ-এক»"
-    "\n     ৪। অধ্যাপক ডঃ «নাম-দুই»             সদস্য"
-    "\n        ডীন, «অনুষদ-দুই»"
-    "\n     ৫। 〃                                সদস্য"
+    "\n     ৩। অধ্যাপক ডঃ মোঃ শাখাওয়াৎ হোসেন ফিরোজ        সদস্য"
+    "\n        প্রধান, রসায়ন বিভাগ"
+    "\n     ৪। অধ্যাপক ডঃ আবু সিদ্দিক                      সদস্য"
+    "\n        ডীন, পুরকৌশল অনুষদ"
+    "\n     ৫। 〃                                          সদস্য"
     "\nis transcribed as exactly this and nothing else:"
     "\n=== PAGE 7 ==="
-    "\n৩। অধ্যাপক ডঃ «নাম-এক» সদস্য"
-    "\nপ্রধান, «বিভাগ-এক»"
-    "\n৪। অধ্যাপক ডঃ «নাম-দুই» সদস্য"
-    "\nডীন, «অনুষদ-দুই»"
+    "\n৩। অধ্যাপক ডঃ মোঃ শাখাওয়াৎ হোসেন ফিরোজ সদস্য"
+    "\nপ্রধান, রসায়ন বিভাগ"
+    "\n৪। অধ্যাপক ডঃ আবু সিদ্দিক সদস্য"
+    "\nডীন, পুরকৌশল অনুষদ"
     "\n৫। 〃 সদস্য"
-    "\nWhat this shows: entry ৩ takes its affiliation from the line printed under ৩, and entry ৪ "
-    "from the line printed under ৪ — the two are read completely independently; the role label "
-    "stays on the same line as the person; the ditto mark is transcribed as printed and never "
-    "expanded; the page marker sits on its own line; no commentary is added."
+    "\nWhat this shows: the rare name is copied letter for letter and not normalized; each entry's "
+    "affiliation is read from its own line; the role stays on the same line as the person; the "
+    "ditto mark is transcribed as printed, never expanded; no commentary is added."
 )
-
 
 PROMPT_COMPLETENESS = (
     "\n\n=== PAGE MARKERS AND COMPLETENESS (mandatory) ==="
@@ -215,34 +208,9 @@ PROMPT_LAYOUT = (
     "offices, numbers and status labels such as সভাপতি or সদস্য sitting to the right of an entry "
     "belong to that entry, on that line. Short right-aligned labels and page numbers never create "
     "a column."
-    "\nL4. In an attendee or member list each numbered entry is ONE record. Work the list ONE ENTRY "
-    "AT A TIME using this procedure: (a) locate this entry's printed number; (b) locate the NEXT "
-    "entry's printed number; (c) everything between those two numbers — name, designation, "
-    "department, office, role, whether on the number's own line or on the indented lines beneath "
-    "it — belongs to THIS entry, and nothing outside that span does; (d) transcribe it "
-    "left-to-right then top-to-bottom; (e) only then move on. An affiliation line such as "
-    "'ডীন, ... অনুষদ' or 'প্রধান, ... বিভাগ' belongs to the entry whose number is printed "
-    "directly above it — never to the entry before or after it. Do not keep one entry's "
-    "affiliation in mind while writing another's."
-    "\nL4b. LOOK-ALIKE NEIGHBOURS ARE THE HIGHEST-RISK MOMENT IN THE WHOLE DOCUMENT. In these "
-    "lists, two entries standing next to each other often share a leading name word and share an "
-    "affiliation template that differs by exactly ONE word — «পদ», «ক» অনুষদ printed directly "
-    "above «পদ», «খ» অনুষদ, with «ক» and «খ» the only difference. That single differing word is "
-    "the one you are most likely to get wrong, because everything around it matches. So before "
-    "writing it, go back to the image and re-read THAT WORD on THIS entry's own line. Do not let "
-    "the word you just wrote for the entry above supply it, and do not let the word you can "
-    "already see on the entry below supply it. Every faculty and department name in the list is "
-    "read independently, even when the surrounding words are identical."
-    "\nL4c. THE ONE-HOLDER CONSTRAINT — this is a fact about the institution, not a guess. A "
-    "faculty (অনুষদ) has exactly ONE ডীন, and a department (বিভাগ) has exactly ONE প্রধান. So if "
-    "you are about to write the SAME faculty for two different ডীন entries, or the same "
-    "department for two different প্রধান entries, that is a signal that you have mis-read one of "
-    "them. Do NOT resolve it by deciding which one to change and inventing a difference. Resolve "
-    "it by going back to the image and re-reading BOTH lines word by word before you write "
-    "either one. If after looking again the page genuinely does print the same value twice, then "
-    "write it twice — the page is always the authority. This constraint applies ONLY to ডীন and "
-    "প্রধান affiliation lines. Ordinary members of a department repeat that department freely, "
-    "and two members sharing a department is completely normal."
+    "\nL4. In an attendee or member list each numbered entry is ONE record. Transcribe everything "
+    "belonging to it — name, designation, department, office, role — before moving to the next "
+    "entry, in natural left-to-right order, and never move a field from one entry into another."
     "\nL5. Headings, titles, dates and any full-width text above the columns come before them; "
     "full-width text below comes after."
     "\nL6. Tables, tabular rows, aligned lists and forms are never split into columns. Keep each "
@@ -315,8 +283,6 @@ PROMPT_CLOSING = (
     "\n\n=== BEFORE YOU FINISH, VERIFY ==="
     "\n  - every supplied page has exactly one '=== PAGE n ===' marker, in order, none repeated;"
     "\n  - every name was read letter by letter from its own line, not normalized to a familiar one;"
-    "\n  - every attendee's affiliation came from the line directly beneath that attendee's own number, and no affiliation was reused between entries;"
-    "\n  - wherever two neighbouring entries have affiliations differing by a single word, that word was re-read separately for each of them;"
     "\n  - EVERY printed number was verified digit by digit directly from the page image a second time;"
     "\n  - this includes dates, proposal numbers, agenda numbers, serial numbers, student IDs, registration numbers, credit values, page numbers and list item numbers;"
     "\n  - no digit was inferred from context, sequence, neighbouring entries or what would look plausible;"
@@ -1191,16 +1157,6 @@ with st.sidebar:
                 "Fewer pages at a time is more accurate, because the model sees less "
                 "at once and cannot copy details between pages. More pages is faster "
                 "and cheaper. Changing the document type above resets this."
-            ),
-        )
-        recheck_conflicts = st.checkbox(
-            "Double-check flagged attendee lines",
-            value=True,
-            help=(
-                "When the audit finds an impossible duplicate — two ডীন sharing one "
-                "অনুষদ — re-read that page with one narrow question as a second "
-                "opinion. Costs ONE extra request per affected page, and only when a "
-                "conflict is actually found. Turn it off to save quota."
             ),
         )
         use_text_layer = st.checkbox(
@@ -2165,63 +2121,42 @@ def _consistency_key(role: str, affiliation: str):
     return role, affil
 
 
-# A duplicate AFFILIATION is logically impossible (one ডীন per অনুষদ), so it is
-# always reported. A duplicate NAME is not: the 463rd minutes genuinely list
-# অধ্যাপক ডঃ মোঃ মনিরুল ইসলাম at CSE entries ৩ and ৯ — two different people.
-# Copying, by contrast, lands on a NEIGHBOURING line, so only a near-adjacent
-# repeat is worth a human's attention.
-NAME_REPEAT_MAX_GAP = 2
-
-def _affiliation_key(value: str) -> str:
-    """Punctuation/space-insensitive form, for comparing two readings."""
-    return _consistency_key("প্রধান", value or "")[1]
-
-
 def ocr_consistency_report(text: str) -> list:
     """Audit numbered attendee lists for tell-tale attention-drift errors.
 
-    Returns a list of dicts: {"message", "kind", "page", "entries", "value"}.
-    "kind" is "affiliation" when the same ডীন/প্রধান affiliation appears twice —
-    logically impossible, so always reported and eligible for the focused
-    re-read below — or "name" when the same person's name repeats within two
-    entries of itself.
+    Each faculty has exactly one ডীন and each department exactly one প্রধান,
+    so two numbered entries carrying the SAME role + affiliation almost always
+    mean the model copied a neighboring entry's line instead of reading this
+    entry's own line. Purely local and deterministic — a duplicate is only
+    reported, never auto-'fixed', because we cannot know which of the two
+    entries is the wrong one without the source PDF.
+
+    To avoid false positives from narrative/agenda text, an affiliation line
+    is only associated with an entry when it is the entry line itself or the
+    line immediately after it (the rigid shape of attendee lists).
     """
     issues = []
     seen = {}
     pending_entry = None
-    pending_number = None
-    section_names = {}
-    page_no = None
+    section_names = {}  # name key -> entry number, reset at each section heading
 
-    def _record(role, affil, entry_label, entry_number, shown_line):
+    def _record(role, affil, entry_label, shown_line):
         if "〃" in affil or "[?]" in affil:
             return
         key = _consistency_key(role, affil)
-        if key in seen and seen[key][0] != entry_label:
-            first_label, first_number, first_page = seen[key]
-            issues.append({
-                "kind": "affiliation",
-                "page": page_no if page_no == first_page else first_page,
-                "entries": [first_number, entry_number],
-                "labels": [first_label, entry_label],
-                "value": shown_line.strip(),
-                "message": (
-                    f"\"{shown_line.strip()}\" appears under both \"{first_label}\" "
-                    f"and \"{entry_label}\" — each অনুষদ has one ডীন and each বিভাগ one "
-                    f"প্রধান, so one of these lines was almost certainly copied from a "
-                    f"neighbouring entry."
-                ),
-            })
+        if key in seen and seen[key] != entry_label:
+            issues.append(
+                f"\"{shown_line.strip()}\" appears under both "
+                f"\"{seen[key]}\" and \"{entry_label}\" — each অনুষদ has one ডীন "
+                f"and each বিভাগ one প্রধান, so one of these lines was almost "
+                f"certainly copied from a neighboring entry. Check the PDF."
+            )
         else:
-            seen.setdefault(key, (entry_label, entry_number, page_no))
+            seen.setdefault(key, entry_label)
 
     for raw_line in (text or "").splitlines():
         line = raw_line.strip()
-        marker = PAGE_MARKER_RE.match(line)
-        if marker:
-            page_no = int(marker.group(1))
-            continue
-        if not line:
+        if not line or PAGE_MARKER_RE.match(line):
             continue
 
         entry_match = _NUMBERED_ENTRY_RE.match(line)
@@ -2229,235 +2164,46 @@ def ocr_consistency_report(text: str) -> list:
             entry_number = entry_match.group(1)
             entry_text = entry_match.group(2)
             pending_entry = _ENTRY_TRAILING_ROLE_RE.sub("", entry_text)[:70]
-            pending_number = entry_number
 
+            # Duplicate-name check WITHIN one section: the model sometimes
+            # copies one entry's name over another's (attention drift). Two
+            # people genuinely sharing a name also happens (CSE has two
+            # মোঃ মনিরুল ইসলাম professors), so this is reported for
+            # verification, never auto-'fixed'.
             person = _audit_person_name(entry_text)
             name_key = _audit_name_key(person)
             if person and len(name_key) >= 6:
-                earlier = section_names.get(name_key)
-                if earlier is not None and earlier != entry_number:
-                    try:
-                        gap = abs(
-                            int(entry_number.translate(BENGALI_TO_ARABIC_DIGITS))
-                            - int(earlier.translate(BENGALI_TO_ARABIC_DIGITS))
-                        )
-                    except ValueError:
-                        gap = 1
-                    if gap <= NAME_REPEAT_MAX_GAP:
-                        issues.append({
-                            "kind": "name", "page": page_no,
-                            "entries": [earlier, entry_number], "value": person,
-                            "message": (
-                                f"\"{person}\" appears at entries {earlier} and "
-                                f"{entry_number} of the same section — only {gap} apart, "
-                                f"so one line may have been copied over another entry's "
-                                f"name. Verify both against the PDF."
-                            ),
-                        })
+                if name_key in section_names and section_names[name_key] != entry_number:
+                    issues.append(
+                        f"\"{person}\" appears at entries {section_names[name_key]} "
+                        f"and {entry_number} of the same section — either two people "
+                        f"share this name, or one line was copied over another "
+                        f"entry's name. Verify both against the PDF."
+                    )
                 else:
                     section_names.setdefault(name_key, entry_number)
 
+            # Old handwritten format: role+affiliation on the entry line itself
+            # (e.g. "৪। ড. ইকবাল মাহমুদ, কেমিকৌশল বিভাগের প্রধান").
             inline = _AFFIL_ROLE_SEARCH_RE.search(entry_text)
             if inline:
-                _record(inline.group(3), inline.group(1), pending_entry,
-                        pending_number, line)
+                _record(inline.group(3), inline.group(1), pending_entry, line)
                 pending_entry = None
             continue
 
         if pending_entry:
             role_match = _ROLE_AFFIL_RE.match(line)
             if role_match:
-                _record(role_match.group(1), role_match.group(2), pending_entry,
-                        pending_number, line)
+                _record(role_match.group(1), role_match.group(2), pending_entry, line)
                 pending_entry = None
                 continue
 
+        # Any other non-empty line is a section heading or narrative text —
+        # a new section starts, so the per-section name set resets.
         pending_entry = None
         section_names = {}
 
     return issues
-
-
-_TRAILING_ROLE_WORD_RE = re.compile(
-    r"\s*(?:সদস্য(?:-সচিব)?|সভাপতি|চেয়ারম্যান|আমন্ত্রিত(?:\s+অতিথি)?|Member|Chairman)\s*$",
-    re.IGNORECASE,
-)
-
-
-def _strip_role_word(value: str) -> str:
-    return _TRAILING_ROLE_WORD_RE.sub("", str(value or "").strip()).strip(" ,;-")
-
-
-def _is_role_only_line(value: str) -> bool:
-    """True for a line holding nothing but সদস্য / সভাপতি etc."""
-    return not _strip_role_word(value)
-
-
-def page_entry_records(text: str, page_no: int) -> list:
-    """[{"number", "name", "affiliation"}] in printed order for ONE page.
-
-    Deliberately a LIST, never a dict keyed by entry number: numbering RESTARTS
-    in every section (সকল ডীন ১..৪, then সকল বিভাগীয় প্রধান ১..১৪, then each
-    department ১..n), so an entry number identifies nothing on its own — keying
-    by it silently overwrites every section with the next.
-
-    The affiliation is the first line beneath the name that is neither blank nor
-    a bare role word. সদস্য frequently occupies a line of its own and is NOT an
-    affiliation.
-    """
-    records = []
-    markers = list(PAGE_MARKER_RE.finditer(text or ""))
-    for i, marker in enumerate(markers):
-        if int(marker.group(1)) != page_no:
-            continue
-        end_pos = markers[i + 1].start() if i + 1 < len(markers) else len(text)
-        lines = [l.strip() for l in text[marker.end():end_pos].splitlines()]
-        for j, line in enumerate(lines):
-            m = _NUMBERED_ENTRY_RE.match(line)
-            if not m:
-                continue
-            affiliation = ""
-            for nxt in lines[j + 1:]:
-                if not nxt or _is_role_only_line(nxt):
-                    continue
-                if _NUMBERED_ENTRY_RE.match(nxt):
-                    break
-                affiliation = _strip_role_word(nxt)
-                break
-            records.append({
-                "number": m.group(1),
-                "name": _strip_role_word(m.group(2)),
-                "affiliation": affiliation,
-            })
-        break
-    return records
-
-
-def find_entry_affiliation(records: list, label: str) -> str:
-    """What the main transcription gave the entry whose NAME matches `label`."""
-    key = _audit_name_key(_audit_person_name(_strip_role_word(label)))
-    for record in records:
-        if _audit_name_key(_audit_person_name(record["name"])) == key:
-            return record["affiliation"]
-    return ""
-
-
-def apply_affiliation_correction(
-    text: str, page_no: int, name: str, new_value: str
-):
-    """Replace ONE attendee's affiliation line on ONE page. Returns (text, ok).
-
-    The line is located exactly the way page_entry_records finds it — the first
-    line beneath the matching NAME that is neither blank nor a bare role word —
-    so what gets rewritten is precisely what was shown in the comparison.
-    Original indentation is preserved and nothing else in the transcription is
-    touched. Returns ok=False rather than guessing if the line cannot be found.
-    """
-    markers = list(PAGE_MARKER_RE.finditer(text or ""))
-    target = _audit_name_key(_audit_person_name(_strip_role_word(name)))
-    for i, marker in enumerate(markers):
-        if int(marker.group(1)) != page_no:
-            continue
-        end = markers[i + 1].start() if i + 1 < len(markers) else len(text)
-        head, body, tail = text[: marker.end()], text[marker.end():end], text[end:]
-        lines = body.split("\n")
-        for j, line in enumerate(lines):
-            m = _NUMBERED_ENTRY_RE.match(line.strip())
-            if not m:
-                continue
-            found = _audit_name_key(_audit_person_name(_strip_role_word(m.group(2))))
-            if found != target:
-                continue
-            for k in range(j + 1, len(lines)):
-                candidate = lines[k].strip()
-                if not candidate or _is_role_only_line(candidate):
-                    continue
-                if _NUMBERED_ENTRY_RE.match(candidate):
-                    break
-                indent = lines[k][: len(lines[k]) - len(lines[k].lstrip())]
-                lines[k] = indent + new_value
-                return head + "\n".join(lines) + tail, True
-            break
-    return text, False
-
-
-ATTENDEE_RECHECK_PROMPT = (
-    "This image is ONE page of a meeting-minutes attendee list. Answer one narrow "
-    "question and nothing else.\n\n"
-    "For EACH name listed at the end of this message, find that person's entry on the "
-    "page and output exactly one line:\n"
-    "  <the person's name as printed><TAB><the affiliation line printed directly "
-    "beneath that name, exactly as printed>\n\n"
-    "The role word printed to the right of a name (সদস্য, সভাপতি) is NOT an "
-    "affiliation — ignore it. An affiliation reads like 'ডীন, ... অনুষদ' or "
-    "'প্রধান, ... বিভাগ' and sits on the line below the name. Read it from that "
-    "entry's OWN line: never copy it from the entry above or below, and never adjust "
-    "one so that it matches the other. If a name genuinely has no affiliation line "
-    "beneath it, write the name, a TAB, and a hyphen. Output only these lines — no "
-    "heading, no commentary.\n\nNames:\n"
-)
-
-
-def recheck_entry_affiliations(
-    page_pdf_bytes: bytes,
-    labels: list,
-    key_pool: "APIKeyPool",
-    model_name: str,
-    dpi: int,
-    preprocess: str,
-) -> dict:
-    """Ask about the two conflicting entries BY NAME, on their own page.
-
-    Names are unique on a page; entry numbers are not. Asking only "what is
-    printed beneath these two names?" is also a far smaller task than
-    transcribing the page, so it is answered without generating the surrounding
-    text that produced the copy. Returns {name key: affiliation}.
-    """
-    images = render_chunk_page_images(page_pdf_bytes, dpi, preprocess)
-    wanted = [_strip_role_word(l) for l in (labels or []) if str(l or "").strip()]
-    if not images or not wanted:
-        return {}
-    prompt = ATTENDEE_RECHECK_PROMPT + "\n".join(f"- {name}" for name in wanted)
-
-    api_key = key_pool.current_key()
-    key_pool.wait(api_key)
-    if NEW_SDK:
-        response = get_new_client(api_key).models.generate_content(
-            model=model_name,
-            contents=[
-                prompt,
-                genai_types.Part.from_bytes(
-                    data=images[0], mime_type=_image_mime(images[0])
-                ),
-            ],
-            config=new_sdk_config(
-                temperature=0.0, _thinking_level=OCR_THINKING_LEVEL
-            ),
-        )
-    else:
-        response = get_legacy_model(api_key, model_name).generate_content(
-            [prompt, {"mime_type": _image_mime(images[0]), "data": images[0]}],
-            generation_config={"temperature": 0.0},
-        )
-    key_pool.record_success(api_key)
-
-    out = {}
-    for line in (response.text or "").splitlines():
-        if "\t" in line:
-            name, _, affiliation = line.partition("\t")
-        else:
-            spaced = re.match(r"^\s*(.+?)\s{2,}(.+?)\s*$", line)
-            if not spaced:
-                continue
-            name, affiliation = spaced.group(1), spaced.group(2)
-        name = clean_bengali_ocr_text(_strip_role_word(name.strip(" -•*")))
-        affiliation = clean_bengali_ocr_text(affiliation.strip())
-        if not name:
-            continue
-        out[_audit_name_key(_audit_person_name(name))] = (
-            "" if affiliation in {"-", "—", "–"} else affiliation
-        )
-    return out
 
 
 _LIST_ITEM_LINE_RE = re.compile(r"^\s*[০-৯0-9]+\s*।")
@@ -2647,8 +2393,6 @@ if uploaded_pdf is not None:
             st.session_state["job_key"] = job_key
             st.session_state["chunks_done"] = {}
             st.session_state["job_complete"] = False
-            st.session_state["affiliation_reviews"] = []
-            st.session_state["applied_affiliation_fixes"] = []
 
         chunks_done = st.session_state["chunks_done"]
 
@@ -2746,7 +2490,7 @@ if uploaded_pdf is not None:
             else:
                 s_pg, e_pg, _bytes = chunks[i]
                 combined_parts.append(
-                    f"[OCR FAILED FOR PAGES {s_pg}–{e_pg} — press Resume OCR to retry this chunk]"
+                    f"[PAGES {s_pg}–{e_pg} COULD NOT BE READ — press Continue reading to try again]"
                 )
         combined = "\n\n".join(combined_parts)
 
@@ -2783,103 +2527,11 @@ if uploaded_pdf is not None:
         if consistency_issues:
             st.warning(
                 f"⚠️ {len(consistency_issues)} attendee line(s) look like they may have "
-                "been copied from a neighbouring entry. Each affected page is being "
-                "re-read below with a single narrow question as a second opinion."
+                "been copied from a neighbouring entry. Worth a quick check."
             )
-            # FOCUSED SECOND OPINION — one extra request per affected PAGE, and
-            # only when the audit found an impossible duplicate. A repeated
-            # ডীন/প্রধান affiliation cannot be right, so that page is re-read
-            # while asking only "what is printed beneath these NAMES?". Names are
-            # unique on a page; entry numbers are not, since numbering restarts
-            # in every section.
-            #
-            # Results go into session state rather than only being drawn: this
-            # block lives inside `if st.button(...)`, so it does not re-execute
-            # on the rerun that a later Apply click causes.
-            st.session_state["affiliation_reviews"] = []
-
-            # Group conflicts BY PAGE first. A page with three conflicts is still
-            # one page: asking about every involved name in a single request
-            # costs one call instead of three, which matters on a free tier where
-            # the daily request count is the binding limit.
-            conflicts_by_page = {}
-            for issue in consistency_issues:
-                if issue["kind"] != "affiliation" or not issue.get("page"):
-                    continue
-                conflicts_by_page.setdefault(issue["page"], []).extend(
-                    issue.get("labels") or []
-                )
-            if conflicts_by_page and not recheck_conflicts:
-                st.caption(
-                    "Double-checking flagged attendee lines is switched off in "
-                    "Advanced settings — no extra request was made."
-                )
-
-            for page_no, raw_labels in sorted(conflicts_by_page.items()):
-                if not recheck_conflicts:
-                    break
-                labels, seen_names = [], set()
-                for label in raw_labels:
-                    key = _audit_name_key(_audit_person_name(_strip_role_word(label)))
-                    if key and key not in seen_names:
-                        seen_names.add(key)
-                        labels.append(label)
-                try:
-                    with st.spinner(
-                        f"Re-reading page {page_no} — one narrow question about "
-                        f"{len(labels)} name(s)..."
-                    ):
-                        fresh = recheck_entry_affiliations(
-                            extract_single_page_pdf(uploaded_pdf_bytes, page_no),
-                            labels, key_pool, model_name,
-                            int(ocr_dpi), preprocess_profile,
-                        )
-                except Exception as recheck_error:
-                    st.caption(
-                        f"Focused re-read of page {page_no} failed "
-                        f"({recheck_error}) — check that page manually."
-                    )
-                    continue
-
-                records = page_entry_records(combined, page_no)
-                for label in labels:
-                    key = _audit_name_key(_audit_person_name(_strip_role_word(label)))
-                    reread_value = fresh.get(key)
-                    if reread_value is None:
-                        continue
-                    main_value = find_entry_affiliation(records, label)
-                    st.session_state["affiliation_reviews"].append({
-                        "page": page_no,
-                        "name": _strip_role_word(label),
-                        "main": main_value,
-                        "reread": reread_value,
-                        "differs": (
-                            _affiliation_key(main_value)
-                            != _affiliation_key(reread_value)
-                        ),
-                        "applied": False,
-                    })
-
-            _reviews = st.session_state.get("affiliation_reviews") or []
-            _differing = [r for r in _reviews if r["differs"]]
-            if _differing:
-                st.warning(
-                    f"🔍 A second reading of the page disagrees on "
-                    f"{len(_differing)} entry(ies). Both versions — and a one-click "
-                    "correction — are with the extracted text below."
-                )
-            elif _reviews:
-                st.info(
-                    "🔍 The focused re-read agrees with the main transcription for "
-                    "every flagged entry — the repeated value may genuinely be printed "
-                    "that way. Check the scan."
-                )
-
             with st.expander("Show the lines to check", expanded=False):
                 with scroll_box(300):
-                    st.markdown(
-                        "- " + "\n- ".join(i["message"] for i in consistency_issues)
-                    )
+                    st.markdown("- " + "\n- ".join(consistency_issues))
 
         # Page-boundary audit: catches an item number lost in a damaged margin
         # followed by silent renumbering of the rest of the list.
@@ -2953,64 +2605,6 @@ if uploaded_pdf is not None:
 if "ocr_result" in st.session_state:
     st.divider()
     st.subheader("✅ Extracted text")
-
-    # ---- Suggested corrections from the focused re-read -------------------
-    # Rendered OUTSIDE the "Read the document" button block, from session
-    # state, so the Apply buttons survive the rerun a click triggers. Each
-    # click rewrites exactly one affiliation line and nothing else.
-    _reviews = st.session_state.get("affiliation_reviews") or []
-    _differing = [r for r in _reviews if r["differs"]]
-    if _differing:
-        st.markdown(
-            "<div class='ec-help'>A focused re-read of the flagged page disagreed "
-            "with the first reading. Check each one against the document, then "
-            "apply the ones that are right — only that single line changes.</div>",
-            unsafe_allow_html=True,
-        )
-        for _index, _review in enumerate(_reviews):
-            if not _review["differs"]:
-                continue
-            _left, _right = st.columns([6, 1])
-            _left.markdown(
-                f"**{_review['name']}** · page {_review['page']}\n\n"
-                f"- first reading: `{_review['main'] or '—'}`\n"
-                f"- second reading: `{_review['reread'] or '—'}`"
-            )
-            if _review["applied"]:
-                _right.success("applied")
-            elif _right.button("Apply", key=f"apply_affiliation_{_index}"):
-                _patched, _ok = apply_affiliation_correction(
-                    st.session_state["ocr_result"],
-                    _review["page"],
-                    _review["name"],
-                    _review["reread"],
-                )
-                if _ok:
-                    st.session_state["ocr_result"] = _patched
-                    _review["applied"] = True
-                    st.session_state.setdefault(
-                        "applied_affiliation_fixes", []
-                    ).append(
-                        f"page {_review['page']} · {_review['name']}: "
-                        f"{_review['main'] or '—'} → {_review['reread']}"
-                    )
-                    st.rerun()
-                else:
-                    _right.error("not found")
-        _outstanding = [r for r in _differing if not r["applied"]]
-        if _outstanding:
-            st.caption(
-                f"{len(_outstanding)} suggested correction(s) not applied yet. "
-                "The download below reflects whatever you have applied."
-            )
-
-    _applied_fixes = st.session_state.get("applied_affiliation_fixes") or []
-    if _applied_fixes:
-        st.success(
-            f"{len(_applied_fixes)} correction(s) applied to the text below:\n\n- "
-            + "\n- ".join(_applied_fixes)
-        )
-
     base_name = st.session_state.get("ocr_filename", "ocr_output")
     st.download_button(
         "Download extracted text (.txt)",
@@ -4669,7 +4263,7 @@ if st.button(
     if not api_key:
         st.error("The reading service is not set up yet. Please ask the administrator to finish setting it up.")
         st.stop()
-    if "[OCR FAILED FOR PAGES" in full_text:
+    if "COULD NOT BE READ — press Continue reading" in full_text:
         st.warning(
             "Some pages could not be read in Step 1, so the record will be missing "
             "that content. Finish reading the document first."
