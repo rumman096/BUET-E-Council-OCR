@@ -1088,7 +1088,7 @@ st.markdown(
 
 with st.sidebar:
     st.header("📄 Document options")
-    st.caption("Gemini access is already configured by the administrator.")
+    st.caption("The reading service is already set up for you.")
 
     document_kind = st.radio(
         "What kind of document is this?",
@@ -1122,7 +1122,7 @@ with st.sidebar:
         model_name = st.text_input(
             "Gemini model",
             value=MODEL_NAME,
-            help="The model used for both OCR and JSON extraction.",
+            help="The model used to read the document and build the meeting record.",
         )
 
         ocr_mode_choice = st.radio(
@@ -1165,12 +1165,12 @@ with st.sidebar:
             help="Only genuinely digital pages are extracted locally (free). Scanned pages — including scans that hide a legacy OCR layer — always go to Gemini.",
         )
         json_chunk_chars = st.slider(
-            "Characters per JSON request",
+            "Text size per request",
             min_value=30_000,
             max_value=100_000,
             value=JSON_CHUNK_CHARS,
             step=10_000,
-            help="Reduce this if a very dense meeting produces incomplete JSON.",
+            help="Lower this if a very long meeting comes out incomplete.",
         )
         max_workers = st.slider(
             "Parallel requests",
@@ -1186,19 +1186,6 @@ with st.sidebar:
             value=DEFAULT_SAFE_RPM,
             step=1,
             help="Set this to a safe per-project RPM for the configured Gemini projects.",
-        )
-
-        st.divider()
-        st.caption(
-            f"SDK: {'google-genai (new)' if NEW_SDK else 'google-generativeai (legacy)'}"
-        )
-        st.caption(
-            "Temporary API errors are retried automatically. Incomplete OCR chunks are "
-            "validated, retried, and split when necessary. Requests use temperature 0."
-        )
-        st.caption(
-            "Cost note: higher image DPI uses more tokens. Raw PDF mode is cheaper for "
-            "clean prints, and usable embedded text is extracted locally for free."
         )
 
 def _unique_api_keys(candidates: list) -> list:
@@ -2346,7 +2333,7 @@ st.markdown(
         <div class="ec-section-title">Extract text from the document</div>
     </div>
     <div class="ec-section-copy">
-        Upload a PDF and press Run OCR. The app automatically checks every processed page.
+        Upload a PDF and press Read the document. Every page is checked automatically.
     </div>
     """,
     unsafe_allow_html=True,
@@ -2380,10 +2367,10 @@ if uploaded_pdf is not None:
     button_label = "🔁 Continue reading" if resuming else "🚀 Read the document"
     if st.button(button_label, type="primary", use_container_width=True):
         if not api_key:
-            st.error("The reading service is not set up yet. Please ask the administrator to add a Gemini API key, then try again.")
+            st.error("The reading service is not set up yet. Please ask the administrator to finish setting it up.")
             st.stop()
 
-        with st.spinner("Splitting PDF into chunks..."):
+        with st.spinner("Preparing the document..."):
             try:
                 chunks, total_pages = split_pdf_into_chunks(uploaded_pdf_bytes, chunk_size)
             except Exception as e:
@@ -2401,37 +2388,6 @@ if uploaded_pdf is not None:
         st.success(
             f"Ready — {total_pages} page(s) will be read in {total_chunks} batch(es)."
         )
-        if input_mode == "images":
-            # The scan's own resolution is the hard ceiling on OCR accuracy;
-            # rendering above 2x it only interpolates.
-            _probe = fitz.open(stream=uploaded_pdf_bytes, filetype="pdf")
-            try:
-                _native = _native_raster_dpi(_probe[0]) if len(_probe) else 0.0
-                _effective = (
-                    effective_render_dpi(_probe[0], int(ocr_dpi))
-                    if len(_probe)
-                    else int(ocr_dpi)
-                )
-            finally:
-                _probe.close()
-            if _native > 0:
-                st.caption(
-                    f"Scan resolution: **{_native:.0f} DPI**. Rendering at "
-                    f"**{_effective} DPI** (capped at 2x the scan). Detail above the "
-                    "scan's own resolution cannot be recovered by a higher setting — "
-                    "if names are still misread, the source scan is the limit."
-                )
-        with st.expander("Technical details (optional)", expanded=False):
-            st.markdown(
-                f"""
-                **Input method:** {mode_desc}  
-                **Parallel requests:** up to {min(max_workers, total_chunks)}  
-                **Request limit:** {safe_rpm} per minute per active key  
-                **Configured keys:** {len(api_keys)} (failover only)  
-                **Validation:** every page is checked before acceptance
-                """
-            )
-
         # Initialize / reset resume state for a new file.
         if st.session_state.get("job_key") != job_key:
             st.session_state["job_key"] = job_key
@@ -2445,7 +2401,7 @@ if uploaded_pdf is not None:
         # touches the API. Scanned pages that merely carry a hidden legacy OCR
         # layer are deliberately excluded — see extract_text_layer_pages.
         if use_text_layer:
-            with st.spinner("Checking for an embedded text layer..."):
+            with st.spinner("Checking the document..."):
                 text_layer_pages, rejected_layer_pages = extract_text_layer_pages(
                     uploaded_pdf_bytes
                 )
@@ -2464,65 +2420,12 @@ if uploaded_pdf is not None:
                         chunks_done[idx] = (start, end, "\n\n".join(parts))
                         local_chunks += 1
                         local_pages += end - start + 1
-                if local_chunks:
-                    st.success(
-                        f"💰 {local_pages} page(s) had a trustworthy embedded text "
-                        f"layer and were extracted locally — {local_chunks} chunk(s) "
-                        "will cost nothing."
-                    )
-                else:
-                    st.info(
-                        f"{len(text_layer_pages)} page(s) have a usable text layer "
-                        "but share chunks with scanned pages — reduce 'Pages per OCR "
-                        "request' to let them skip the API."
-                    )
-            if rejected_layer_pages:
-                order = sorted(rejected_layer_pages)
-                sample = ", ".join(str(p + 1) for p in order[:8])
-                if len(order) > 8:
-                    sample += ", ..."
-                st.info(
-                    f"{len(rejected_layer_pages)} page(s) carry an embedded text "
-                    f"layer that is NOT real document text — {rejected_layer_pages[order[0]]}. "
-                    f"Affected page(s): {sample}. These pages are being read by "
-                    "Gemini instead; trusting the built-in layer would return a "
-                    "scrambled transcription for free rather than a correct one."
-                )
-
-        # Input-token estimate for the requests that will actually be sent.
-        remote_chunks = [
-            (start, end, b)
-            for idx, (start, end, b) in enumerate(chunks)
-            if idx not in chunks_done
-        ]
-        if remote_chunks:
-            est_total, est_per_page = estimate_ocr_input_tokens(
-                remote_chunks, input_mode, int(ocr_dpi)
-            )
-            pdf_alt, _ = estimate_ocr_input_tokens(remote_chunks, "pdf", 0)
-            comparison = (
-                f" (PDF mode would be ≈ {pdf_alt:,})"
-                if input_mode == "images"
-                else ""
-            )
-            st.caption(
-                f"Estimated OCR input ≈ **{est_total:,} tokens** "
-                f"(~{est_per_page:,} tokens/page{comparison}). Output tokens ≈ "
-                "the document's text length. Estimates exclude retries and "
-                "implicit-cache discounts on the repeated prompt."
-            )
-
         progress = st.progress(len(chunks_done) / total_chunks)
         status = st.empty()
         failed_chunks = []
 
         _skip_keys = remembered_exhausted_keys()
         key_pool = APIKeyPool(api_keys, int(safe_rpm), unavailable=_skip_keys)
-        if _skip_keys and len(_skip_keys) < len(api_keys):
-            st.caption(
-                f"Skipping {len(_skip_keys)} key(s) that ran out of quota in the "
-                "last 10 minutes — they will be tried again after that."
-            )
         pending = [
             (idx, start, end, chunk_bytes)
             for idx, (start, end, chunk_bytes) in enumerate(chunks)
@@ -2551,17 +2454,18 @@ if uploaded_pdf is not None:
                         idx, start, end, text = future.result()
                         chunks_done[idx] = (start, end, text)
                     except Exception as e:
+                        print(f"read failed, pages {start}-{end}: {e}")  # server log
                         st.error(
-                            f"Chunk {idx + 1} (pages {start}–{end}) failed after all "
-                            f"retries and splits: {e}"
+                            f"Pages {start}–{end} could not be read. Press "
+                            "🔁 Continue reading to try them again."
                         )
                         failed_chunks.append((idx + 1, start, end))
 
                     processed = len(chunks_done) + len(failed_chunks)
                     progress.progress(min(1.0, processed / total_chunks))
                     status.text(
-                        f"Processed {processed}/{total_chunks} chunks "
-                        f"(verified OK: {len(chunks_done)}; latest: pages {start}–{end})..."
+                        f"Read {min(processed * chunk_size, total_pages)} of "
+                        f"{total_pages} page(s)..."
                     )
 
         progress.progress(1.0)
@@ -2572,10 +2476,9 @@ if uploaded_pdf is not None:
         if failed_chunks:
             status.text(f"Finished with {len(failed_chunks)} failed chunk(s) ⚠️")
             st.warning(
-                "Failed chunks: "
-                + ", ".join(f"chunk {c} (pages {s}–{e})" for c, s, e in failed_chunks)
-                + ". Failed chunks are NOT cached, so pressing 🔁 Resume OCR re-sends "
-                "only these chunks."
+                "These pages could not be read: "
+                + ", ".join(f"{s}–{e}" for _c, s, e in failed_chunks)
+                + ". Press 🔁 Continue reading to try just those again."
             )
         else:
             status.text("Done ✅")
@@ -2587,7 +2490,7 @@ if uploaded_pdf is not None:
             else:
                 s_pg, e_pg, _bytes = chunks[i]
                 combined_parts.append(
-                    f"[OCR FAILED FOR PAGES {s_pg}–{e_pg} — press Resume OCR to retry this chunk]"
+                    f"[PAGES {s_pg}–{e_pg} COULD NOT BE READ — press Continue reading to try again]"
                 )
         combined = "\n\n".join(combined_parts)
 
@@ -2595,9 +2498,9 @@ if uploaded_pdf is not None:
         unreadable = combined.count("[?]")
         if unreadable:
             st.info(
-                f"The model marked **{unreadable}** word(s) as illegible ([?]) "
-                "rather than guessing — search the downloaded text for '[?]' and "
-                "fill them in from the source document."
+                f"**{unreadable}** word(s) could not be read clearly and are marked "
+                "**[?]** in the text instead of being guessed. Search for '[?]' and "
+                "fill those in from the document."
             )
 
         # Whole-document audit: every absolute page marker must be present exactly.
@@ -2609,13 +2512,13 @@ if uploaded_pdf is not None:
             if absolute_missing:
                 st.session_state["job_complete"] = False
                 st.warning(
-                    "Page audit: markers missing for page(s) "
+                    "Some page(s) are missing from the text: "
                     + ", ".join(map(str, absolute_missing))
-                    + ". Press Resume OCR to retry."
+                    + ". Press 🔁 Continue reading to try them again."
                 )
             else:
                 st.success(
-                    f"Page audit passed ✅ — all {total_pages} page markers are present."
+                    f"All {total_pages} page(s) were read and checked ✅"
                 )
 
         # Deterministic duplicate-affiliation audit (catches attention-drift
@@ -2694,9 +2597,6 @@ if uploaded_pdf is not None:
 
         remember_exhausted_keys(key_pool)
         st.session_state["ocr_result"] = combined
-        # Keep a separate editable copy for the preview. This is refreshed only
-        # when a new OCR result is produced, so manual edits survive Streamlit reruns.
-        st.session_state["ocr_editor"] = combined
         st.session_state["ocr_filename"] = uploaded_pdf.name.rsplit(".", 1)[0]
 
 # ==========================================
@@ -2704,7 +2604,7 @@ if uploaded_pdf is not None:
 # ==========================================
 if "ocr_result" in st.session_state:
     st.divider()
-    st.subheader("✅ OCR result")
+    st.subheader("✅ Extracted text")
     base_name = st.session_state.get("ocr_filename", "ocr_output")
     st.download_button(
         "Download extracted text (.txt)",
@@ -2719,48 +2619,16 @@ if "ocr_result" in st.session_state:
         mime="text/markdown",
     )
     with st.expander("Preview extracted text", expanded=False):
-        # Initialize once for older saved OCR results that predate the editor key.
-        if "ocr_editor" not in st.session_state:
-            st.session_state["ocr_editor"] = st.session_state["ocr_result"]
-
-        ocr_preview_text = st.session_state["ocr_editor"]
+        ocr_preview_text = st.session_state["ocr_result"]
         st.caption(
             f"{len(ocr_preview_text):,} characters — scroll inside the box below. "
-            "You may edit the text, then press Apply edits before creating JSON."
+            "Drag its bottom-right corner to make it taller."
         )
         st.text_area(
             "Combined OCR output",
+            ocr_preview_text,
             height=400,
-            key="ocr_editor",
         )
-
-        if st.button(
-            "✅ Apply edits",
-            key="apply_ocr_edits",
-            type="primary",
-            use_container_width=True,
-        ):
-            edited_text = st.session_state.get("ocr_editor", "")
-            previous_text = st.session_state.get("ocr_result", "")
-
-            if edited_text != previous_text:
-                # Stage 2 reads ocr_result, so save the edited preview there.
-                st.session_state["ocr_result"] = edited_text
-
-                # Any cached JSON belongs to the previous text and must not be reused.
-                for state_key in (
-                    "json_job_key",
-                    "json_partials_done",
-                    "json_job_complete",
-                    "json_result",
-                ):
-                    st.session_state.pop(state_key, None)
-
-                st.success(
-                    "Edits applied ✅ — the meeting JSON will use this corrected text."
-                )
-            else:
-                st.info("No text changes were detected.")
 
 # ============================================================
 # STAGE 2 (TAILORED): OCR TEXT → MEETING-MINUTES JSON
@@ -4287,29 +4155,30 @@ st.markdown(
     """
     <div class="ec-section-heading">
         <div class="ec-section-badge">2</div>
-        <div class="ec-section-title">Convert meeting text to JSON</div>
+        <div class="ec-section-title">Create the meeting record</div>
     </div>
     <div class="ec-section-copy">
-        Use the OCR result from Step 1, or provide previously extracted text.
-        The app validates and combines the meeting information automatically.
+        Turns the text from Step 1 into a structured meeting record you can
+        download. You can also paste in text of your own.
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-with st.expander("What the JSON converter does", expanded=False):
+with st.expander("What this step does", expanded=False):
     st.markdown(
         """
-        - Keeps only the supported Bengali academic designations.
-        - Standardizes close department and office matches while preserving ambiguous values.
-        - Converts Bengali subpoints and Markdown tables into compact HTML.
-        - Validates every JSON part, supports resume, and creates a final quality report.
+        - Pulls out the meeting details, the attendee list and every agenda item.
+        - Matches departments and offices to their official names where it can, and
+          leaves anything uncertain exactly as written.
+        - Keeps tables and lettered sub-points formatted.
+        - Checks the finished record and tells you what to verify.
         """
     )
 
 source_choice = st.radio(
     "Choose the text source",
-    ["Use OCR result from Step 1", "Upload or paste extracted text"],
+    ["Use the text from Step 1", "Upload or paste my own text"],
     horizontal=True,
 )
 
@@ -4389,15 +4258,15 @@ if st.button(
     full_text = clean_bengali_ocr_text(current_json_source)
 
     if not full_text.strip():
-        st.error("No text to process. Run OCR first or paste text.")
+        st.error("There is no text yet. Read a document in Step 1, or paste your own text.")
         st.stop()
     if not api_key:
-        st.error("The reading service is not set up yet. Please ask the administrator to add a Gemini API key, then try again.")
+        st.error("The reading service is not set up yet. Please ask the administrator to finish setting it up.")
         st.stop()
-    if "[OCR FAILED FOR PAGES" in full_text:
+    if "COULD NOT BE READ — press Continue reading" in full_text:
         st.warning(
-            "The OCR text still contains failed-chunk placeholders. The JSON will "
-            "miss that content — resume the OCR stage first for a complete result."
+            "Some pages could not be read in Step 1, so the record will be missing "
+            "that content. Finish reading the document first."
         )
 
     chunks = split_text_with_overlap(full_text, int(json_chunk_chars))
@@ -4417,19 +4286,9 @@ if st.button(
     ]
 
     st.info(
-        f"Preparing {total} text batch(es). {len(pending_items)} batch(es) still need processing."
+        f"Working through the document in {total} section(s); "
+        f"{len(pending_items)} still to do."
     )
-    with st.expander("Technical details (optional)", expanded=False):
-        st.markdown(
-            f"""
-            **Validated batches already saved:** {len(partials_done)}  
-            **Requests remaining:** {len(pending_items)}  
-            **Parallel requests:** up to {min(max_workers, max(1, len(pending_items)))}  
-            **Request limit:** {safe_rpm} per minute per active key  
-            **Configured keys:** {len(api_keys)} (failover only)
-            """
-        )
-
     progress = st.progress(len(partials_done) / total)
     status = st.empty()
     failed = []
@@ -4464,33 +4323,34 @@ if st.button(
                     partials_done[result_i] = result
                 except Exception as e:
                     failed.append(i + 1)
-                    st.error(f"Chunk {i + 1} failed: {e}")
+                    print(f"record section {i + 1} failed: {e}")  # server log
+                    st.error(f"Section {i + 1} of the document could not be processed.")
 
                 completed_this_run += 1
                 progress.progress(len(partials_done) / total)
                 status.text(
-                    f"Finished {completed_this_run}/{len(pending_items)} requests in this run; "
-                    f"cached {len(partials_done)}/{total} validated JSON chunks..."
+                    f"Processed {completed_this_run} of {len(pending_items)} "
+                    f"section(s) of the document..."
                 )
 
     remember_exhausted_keys(key_pool)
 
     if not partials_done:
-        st.error("All chunks failed — nothing to merge.")
+        st.error("None of the document could be processed. Please try again.")
         st.stop()
 
     missing = [i + 1 for i in range(total) if i not in partials_done]
     if missing:
         st.session_state["json_job_complete"] = False
         st.warning(
-            "The JSON is not final because these chunk(s) are still missing: "
+            "The record is not complete yet — section(s) "
             + ", ".join(map(str, missing))
-            + ". Press Resume Meeting JSON to send only those chunks again."
+            + " still need processing. Press 🔁 Continue building the record."
         )
         status.text("Paused with missing chunks ⚠️")
     else:
         partials = [partials_done[i] for i in range(total)]
-        status.text("Merging partial results locally (no extra request)...")
+        status.text("Putting the meeting record together...")
 
         final = (
             merge_meeting_partials(partials)
@@ -4513,13 +4373,12 @@ if st.button(
                 with scroll_box(300):
                     st.markdown("- " + "\n- ".join(issues))
         else:
-            st.success("Quality report passed ✅ — all key fields present and consistent.")
+            st.success("Everything checked out ✅ — all the key details are present.")
 
         if stitch_notes:
             st.info(
-                f"🔧 {len(stitch_notes)} agenda continuation(s) were re-joined to "
-                "their proposal (a proposal split across a page boundary):\n\n- "
-                + "\n- ".join(stitch_notes)
+                f"🔧 {len(stitch_notes)} agenda item(s) that ran across a page break "
+                "were joined back together."
             )
 
         if applied_corrections:
@@ -4540,15 +4399,15 @@ if st.button(
         )
 
 if "json_result" in st.session_state:
-    st.subheader("✅ Meeting JSON result")
+    st.subheader("✅ Meeting record")
     base_name = st.session_state.get("ocr_filename", "meeting")
     st.download_button(
-        "Download meeting JSON",
+        "Download the meeting record",
         data=st.session_state["json_result"],
         file_name=f"{base_name}.json",
         mime="application/json",
     )
-    with st.expander("Preview JSON", expanded=False):
+    with st.expander("Preview the meeting record", expanded=False):
         json_preview_text = st.session_state["json_result"]
         st.caption(
             f"{len(json_preview_text.splitlines()):,} lines — scroll inside the "
