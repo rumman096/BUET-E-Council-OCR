@@ -124,8 +124,9 @@ PROMPT_NON_NEGOTIABLE = (
     "entry, another page, the same word written elsewhere in the document, how common a spelling "
     "is, what would make a list look consistent, what a similar document usually says, or your own "
     "knowledge of Bengali names, departments and places. Do not compare entries against each "
-    "other in EITHER direction: never change a value so that two entries agree, and never carry "
-    "a value forward from one entry to the next because the entries look similar. Every entry is "
+    "other in EITHER direction. Never change a value so that two entries agree. Never carry a value "
+    "FORWARD from the entry above, and never pull a value BACKWARD from the entry below — a "
+    "neighbouring line is not evidence about this line, whichever side it sits on. Every entry is "
     "decided only by its own printed lines. This single rule prevents most serious errors.",
 
     "\n\nN2. NAMES ARE COPIED GLYPH BY GLYPH. A person's name has no 'correct' form other than the "
@@ -223,6 +224,15 @@ PROMPT_LAYOUT = (
     "'ডীন, ... অনুষদ' or 'প্রধান, ... বিভাগ' belongs to the entry whose number is printed "
     "directly above it — never to the entry before or after it. Do not keep one entry's "
     "affiliation in mind while writing another's."
+    "\nL4b. LOOK-ALIKE NEIGHBOURS ARE THE HIGHEST-RISK MOMENT IN THE WHOLE DOCUMENT. In these "
+    "lists, two entries standing next to each other often share a leading name word and share an "
+    "affiliation template that differs by exactly ONE word — «পদ», «ক» অনুষদ printed directly "
+    "above «পদ», «খ» অনুষদ, with «ক» and «খ» the only difference. That single differing word is "
+    "the one you are most likely to get wrong, because everything around it matches. So before "
+    "writing it, go back to the image and re-read THAT WORD on THIS entry's own line. Do not let "
+    "the word you just wrote for the entry above supply it, and do not let the word you can "
+    "already see on the entry below supply it. Every faculty and department name in the list is "
+    "read independently, even when the surrounding words are identical."
     "\nL5. Headings, titles, dates and any full-width text above the columns come before them; "
     "full-width text below comes after."
     "\nL6. Tables, tabular rows, aligned lists and forms are never split into columns. Keep each "
@@ -296,6 +306,7 @@ PROMPT_CLOSING = (
     "\n  - every supplied page has exactly one '=== PAGE n ===' marker, in order, none repeated;"
     "\n  - every name was read letter by letter from its own line, not normalized to a familiar one;"
     "\n  - every attendee's affiliation came from the line directly beneath that attendee's own number, and no affiliation was reused between entries;"
+    "\n  - wherever two neighbouring entries have affiliations differing by a single word, that word was re-read separately for each of them;"
     "\n  - EVERY printed number was verified digit by digit directly from the page image a second time;"
     "\n  - this includes dates, proposal numbers, agenda numbers, serial numbers, student IDs, registration numbers, credit values, page numbers and list item numbers;"
     "\n  - no digit was inferred from context, sequence, neighbouring entries or what would look plausible;"
@@ -2199,13 +2210,24 @@ def ocr_consistency_report(text: str) -> list:
             person = _audit_person_name(entry_text)
             name_key = _audit_name_key(person)
             if person and len(name_key) >= 6:
-                if name_key in section_names and section_names[name_key] != entry_number:
-                    issues.append(
-                        f"\"{person}\" appears at entries {section_names[name_key]} "
-                        f"and {entry_number} of the same section — either two people "
-                        f"share this name, or one line was copied over another "
-                        f"entry's name. Verify both against the PDF."
-                    )
+                earlier_entry = section_names.get(name_key)
+                if earlier_entry is not None and earlier_entry != entry_number:
+                    try:
+                        gap = abs(
+                            int(entry_number.translate(BENGALI_TO_ARABIC_DIGITS))
+                            - int(earlier_entry.translate(BENGALI_TO_ARABIC_DIGITS))
+                        )
+                    except ValueError:
+                        gap = 1
+                    # Far-apart repeats are almost always two real namesakes;
+                    # reporting them trains the reader to ignore this warning.
+                    if gap <= NAME_REPEAT_MAX_GAP:
+                        issues.append(
+                            f"\"{person}\" appears at entries {earlier_entry} and "
+                            f"{entry_number} of the same section — only {gap} apart, so "
+                            f"one line may have been copied over another entry's name. "
+                            f"Verify both against the PDF."
+                        )
                 else:
                     section_names.setdefault(name_key, entry_number)
 
@@ -2231,6 +2253,13 @@ def ocr_consistency_report(text: str) -> list:
 
     return issues
 
+
+# A duplicate AFFILIATION is logically impossible (one ডীন per অনুষদ), so it is
+# always reported. A duplicate NAME is not: the 463rd minutes genuinely list
+# অধ্যাপক ডঃ মোঃ মনিরুল ইসলাম at CSE entries ৩ and ৯ — two different people.
+# Copying, by contrast, lands on a NEIGHBOURING line, so only a near-adjacent
+# repeat is worth a human's attention.
+NAME_REPEAT_MAX_GAP = 2
 
 _LIST_ITEM_LINE_RE = re.compile(r"^\s*[০-৯0-9]+\s*।")
 _BARE_PAGE_NUMBER_RE = re.compile(r"^[০-৯0-9]{1,3}$")
