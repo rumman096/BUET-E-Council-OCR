@@ -1,4 +1,4 @@
-\import time
+import time
 import html
 import hashlib
 import io
