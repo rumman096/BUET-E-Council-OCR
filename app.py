@@ -3393,6 +3393,9 @@ EXTRACTION_RULES = """You are extracting structured data from the minutes of an 
   - body: full proposal text verbatim, starting with "প্রস্তাব নং ...". Preserve line breaks as \n.
     Preserve every table as a Markdown pipe table: one header row, one separator row,
     and every data row. Never flatten a table into ordinary paragraph text.
+    A ONE-COLUMN table is still a table: write its header, separator, and every value
+    on separate lines, each with leading and trailing pipes (for example | Header |,
+    | --- |, | Value |). Never turn a one-column table into an inline pipe sequence.
   - resolution: full "সিদ্ধান্ত : ..." text verbatim. If the resolution is missing in this text portion, use null. Preserve any table in the resolution as a Markdown pipe table too.
   - ONE PROPOSAL = ONE AGENDA ENTRY, EVEN ACROSS PAGES: a proposal begins at a "প্রস্তাব নং ..." line and continues until the NEXT "প্রস্তাব নং ..." line. Everything in between belongs to that same entry: continuation paragraphs, tables and table rows that carry on over a page break, repeated table headers, the section/department/faculty headings that label those tables (e.g. "স্থাপত্য বিভাগ", "পুরকৌশল বিভাগ", "আই.পি.ই বিভাগ", "যন্ত্রকৌশল বিভাগ"), lists of names, roll numbers or course codes, and that item's own "সিদ্ধান্ত ঃ" text. NEVER begin a new agenda entry merely because a new page starts, a new table starts, or a new heading appears. If a page begins with a table, a table header row, a heading, or any text that is not itself a "প্রস্তাব নং ..." line, it is a CONTINUATION: append it to the body of the proposal already in progress, keeping every table as a Markdown pipe table. In this format an agenda entry whose body does not begin with "প্রস্তাব নং" is always a mistake.
   - OLD FORMAT: older minutes have no প্রস্তাব নং items; instead a সিদ্ধান্তাবলী (decisions) section — or in English a "RESOLUTIONS:" section — lists numbered items (১।, ২।, ... / 1., 2., ...). Treat each numbered item as one agenda entry: body = the item's full text verbatim. If the item text itself states the decision (…সিদ্ধান্ত গ্রহণ করা হয়, …অনুমোদন করা হয়, …কনফার্ম করা হয়; English: "Confirmed ...", "... and resolved that ...", "Considered and approved ..."), also copy that deciding sentence (or the whole item if it is one sentence) into resolution; otherwise resolution = null. This next exception applies ONLY to that old format — a document that contains no "প্রস্তাব নং" item anywhere: if a page BEGINS with a short, complete, standalone decision paragraph that carries no number (its number may have been lost in a damaged margin) and is not a continuation of the previous item, treat it as its OWN agenda entry. It NEVER applies to a document that uses প্রস্তাব নং, and it never applies to a table, a table header row, or a section/department heading.
@@ -4000,25 +4003,87 @@ def _split_markdown_table_row(line: str) -> list:
 
 
 def _is_markdown_table_separator(line: str) -> bool:
-    """Return True for rows such as | --- | :---: | ---: |."""
+    """Return True for one- or multi-column separator rows.
+
+    Examples: ``| --- |`` and ``| :--- | ---: |``. One-column tables are
+    common in the meeting minutes, so requiring two cells would incorrectly
+    flatten them into paragraph text.
+    """
     cells = _split_markdown_table_row(line)
-    return len(cells) >= 2 and all(
+    return len(cells) >= 1 and all(
         bool(MARKDOWN_SEPARATOR_CELL.fullmatch(cell.replace(" ", "")))
         for cell in cells
     )
 
 
 def _looks_like_table_row(line: str) -> bool:
-    """A row like '| ক | খ | গ |' — at least 2 pipes and 2 non-empty cells.
+    """Return True for a one- or multi-column Markdown pipe row.
 
-    Lets tables be detected even when the '| --- | --- |' separator row is
-    missing from the extracted text.
+    Leading and trailing pipes give even a one-column row two pipe characters,
+    for example ``| IPE-307 |``. Requiring two CELLS used to reject all such
+    tables. A table start is still accepted only when followed by a separator
+    or another pipe row, so ordinary prose containing pipes is not promoted to
+    a table by one isolated line.
     """
     value = str(line or "").strip()
     if value.count("|") < 2:
         return False
     cells = _split_markdown_table_row(value)
-    return len(cells) >= 2 and any(cell for cell in cells)
+    return len(cells) >= 1 and any(cell for cell in cells)
+
+
+# Gemini normally preserves Markdown row breaks, but a long continuation that
+# begins on a new PDF page can occasionally arrive as one inline sequence:
+# ``| Header | | --- | | Row 1 | | Row 2 |``. Restore only the unambiguous
+# ONE-COLUMN form before the regular line-based parser runs. Multi-column tables
+# do not match this pattern and continue through the existing parser unchanged.
+_FLATTENED_SINGLE_COLUMN_TABLE_RE = re.compile(
+    r"(?P<header>\|\s*[^|\n<>]+?\s*\|)"
+    r"[ \t\r\n]+"
+    r"(?P<separator>\|\s*:?-{3,}:?\s*\|)"
+    r"(?P<rows>(?:[ \t\r\n]+\|\s*(?!:?-{3,}:?\s*\|)[^|\n<>]*?\s*\|)+)",
+    flags=re.IGNORECASE,
+)
+
+
+def _expand_flattened_single_column_tables(value: str) -> str:
+    """Restore row breaks in flattened one-column Markdown tables.
+
+    The replacement is deliberately conservative: it requires a header row,
+    a one-cell ``---`` separator row, and at least one following pipe row. It
+    therefore repairs the IPE/ME/MME/URP/CSE/WRE pattern without guessing table
+    structure from ordinary prose or altering two-column tables with blanks.
+    """
+    source = str(value or "")
+
+    def replace_match(match: re.Match) -> str:
+        row_cells = re.findall(
+            r"\|\s*([^|\n<>]*?)\s*\|",
+            match.group("rows"),
+        )
+        rows = [f"| {cell.strip()} |" for cell in row_cells]
+        if not rows:
+            return match.group(0)
+
+        # Surround the restored table with newlines so a department heading
+        # immediately before/after it remains outside the table.
+        return (
+            "\n"
+            + match.group("header").strip()
+            + "\n"
+            + match.group("separator").strip()
+            + "\n"
+            + "\n".join(rows)
+            + "\n"
+        )
+
+    # ``re.sub`` is global, so every non-overlapping one-column table in the
+    # proposal is repaired in one pass. A repeated pass would keep matching an
+    # already-restored table and add unnecessary blank lines.
+    return _FLATTENED_SINGLE_COLUMN_TABLE_RE.sub(
+        replace_match,
+        source,
+    )
 
 
 def _render_html_table(header: list, rows: list) -> str:
@@ -4085,6 +4150,10 @@ def convert_tables_and_lists_to_html(text):
 
     if _contains_generated_rich_html(original):
         return original
+
+    # Repair the occasional inline representation of a one-column table before
+    # the ordinary Markdown line parser examines it.
+    original = _expand_flattened_single_column_tables(original)
 
     lines = original.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     segments = []
