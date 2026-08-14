@@ -73,6 +73,19 @@ DEFAULT_SAFE_RPM = 15
 MAX_INLINE_MB = 19  # inline request payload safety limit (~20 MB hard cap)
 OCR_THINKING_LEVEL = "minimal"
 JSON_THINKING_LEVEL = "low"
+# Models that REJECT thinking_level="minimal" with an API validation error.
+# gemini-3.7-flash only accepts low / medium / high, so asking for "minimal"
+# fails every request with INVALID_ARGUMENT — which this app treats as fatal,
+# so every page reports "could not be read". Fall back to the nearest level.
+NO_MINIMAL_THINKING = ("3.7-flash", "3.7-pro")
+
+
+def resolve_thinking_level(model_name: str, level: str) -> str:
+    """Downgrade 'minimal' to 'low' on models that do not support it."""
+    name = (model_name or "").lower()
+    if level == "minimal" and any(tag in name for tag in NO_MINIMAL_THINKING):
+        return "low"
+    return level
 OCR_ATTEMPTS = 5  # retries per request for transient errors AND incomplete output
 JSON_ATTEMPTS = 5
 OCR_IMAGE_DPI = 300  # render resolution for image-mode OCR
@@ -1958,7 +1971,9 @@ def ocr_chunk_with_gemini(
                     contents=[prompt] + payload_parts,
                     config=new_sdk_config(
                         temperature=0.0,
-                        _thinking_level=OCR_THINKING_LEVEL,
+                        _thinking_level=resolve_thinking_level(
+                            model_name, OCR_THINKING_LEVEL
+                        ),
                     ),
                 )
             else:
@@ -2460,9 +2475,13 @@ if uploaded_pdf is not None:
                         chunks_done[idx] = (start, end, text)
                     except Exception as e:
                         print(f"read failed, pages {start}-{end}: {e}")  # server log
+                        reason = str(e).strip().replace("\n", " ")
+                        if len(reason) > 300:
+                            reason = reason[:300] + "…"
                         st.error(
                             f"Pages {start}–{end} could not be read. Press "
-                            "🔁 Continue reading to try them again."
+                            "🔁 Continue reading to try them again.\n\n"
+                            f"Reason: {reason or type(e).__name__}"
                         )
                         failed_chunks.append((idx + 1, start, end))
 
@@ -3519,7 +3538,9 @@ def gemini_extract_meeting(
                         temperature=0.0,
                         response_mime_type="application/json",
                         response_schema=MEETING_SCHEMA,
-                        _thinking_level=JSON_THINKING_LEVEL,
+                        _thinking_level=resolve_thinking_level(
+                            model_name, JSON_THINKING_LEVEL
+                        ),
                     ),
                 )
                 raw = response.text or ""
