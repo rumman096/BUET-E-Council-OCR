@@ -77,7 +77,7 @@ JSON_THINKING_LEVEL = "low"
 # gemini-3.7-flash only accepts low / medium / high, so asking for "minimal"
 # fails every request with INVALID_ARGUMENT — which this app treats as fatal,
 # so every page reports "could not be read". Fall back to the nearest level.
-NO_MINIMAL_THINKING = ("3.7-flash", "3.7-pro")
+NO_MINIMAL_THINKING = ("3.7-flash", "3.7-pro","3.8-flash")
 
 
 def resolve_thinking_level(model_name: str, level: str) -> str:
