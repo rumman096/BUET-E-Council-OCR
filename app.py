@@ -10,7 +10,14 @@ import re
 import threading
 import unicodedata
 from difflib import SequenceMatcher
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
+from pathlib import Path
+from datetime import datetime, timezone
+import copy
+import tempfile
+import uuid
+import zipfile
+from contextlib import contextmanager
 
 import streamlit as st
 
@@ -53,7 +60,8 @@ except ImportError:
 # For local/Docker use, an optional comma-separated GEMINI_API_KEYS environment
 # variable is also supported. Real keys are never stored in this source file.
 try:
-    _secret_keys = list(st.secrets.get("GEMINI_API_KEYS", []))
+    _secret_keys = st.secrets.get("GEMINI_API_KEYS", [])
+    _secret_keys = _secret_keys.split(",") if isinstance(_secret_keys, str) else list(_secret_keys)
 except Exception:
     _secret_keys = []
 
@@ -68,7 +76,7 @@ CHUNK_SIZE = 4  # short visual context: long chunks make the model copy
 # names and affiliations between neighbouring entries. 4 pages renders to
 # ~3.8 MB, so it is also never force-split by the inline payload limit.
 JSON_CHUNK_CHARS = 70_000  # fewer JSON requests; adjustable from the sidebar
-DEFAULT_MAX_WORKERS = 18  # concurrency only; the limiter still controls request starts
+DEFAULT_MAX_WORKERS = 4  # concurrency only; the limiter still controls request starts
 DEFAULT_SAFE_RPM = 15
 MAX_INLINE_MB = 19  # inline request payload safety limit (~20 MB hard cap)
 OCR_THINKING_LEVEL = "minimal"
@@ -77,7 +85,7 @@ JSON_THINKING_LEVEL = "low"
 # gemini-3.7-flash only accepts low / medium / high, so asking for "minimal"
 # fails every request with INVALID_ARGUMENT — which this app treats as fatal,
 # so every page reports "could not be read". Fall back to the nearest level.
-NO_MINIMAL_THINKING = ("3.7-flash", "3.7-pro","3.8-flash")
+NO_MINIMAL_THINKING = ("3.7-flash", "3.7-pro", "3.8-flash", "3-pro", "3.1-pro", "2.5-")
 
 
 def resolve_thinking_level(model_name: str, level: str) -> str:
@@ -117,7 +125,7 @@ PROMPT_MISSION = (
 
     "\n\nWHY THIS MATTERS — read this before any rule. Every NAME, DATE and NUMBER you transcribe "
     "is copied verbatim into a permanent institutional database, where it identifies real people, "
-    "and it is NEVER re-checked against this page afterwards. A name that is fluent, plausible and "
+    "and may be relied on before a human catches a transcription error. A name that is fluent, plausible and "
     "wrong is therefore the worst output you can produce: it is indistinguishable from a correct "
     "one and it corrupts the record silently. Your priorities, highest first:"
     "\n  (1) every character of every name, date and number matches this page exactly;"
@@ -329,7 +337,7 @@ def chunk_prompt_for(
     input_mode: str, expected_pages: int, preprocess: str = "degraded"
 ) -> str:
     """Return the OCR prompt adapted to the payload type and document type."""
-    prompt = build_chunk_prompt(handwritten=(preprocess == "degraded"))
+    prompt = build_chunk_prompt(handwritten=(preprocess in ("degraded", "strong")))
     if input_mode == "pdf":
         return prompt
     prompt = prompt.replace("this PDF", "this ordered set of page images")
@@ -349,704 +357,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="auto",
 )
-
-st.markdown(
-    """
-    <style>
-        /* ---------------------------------------------------------
-           BUET E-COUNCIL — COMPACT RESPONSIVE LIGHT THEME
-           --------------------------------------------------------- */
-        :root {
-            color-scheme: light !important;
-            --ec-red: #a80714;
-            --ec-red-dark: #820810;
-            --ec-red-soft: #fff3f4;
-            --ec-bg: #f8f5f5;
-            --ec-card: #ffffff;
-            --ec-border: #ead9da;
-            --ec-text: #2f2526;
-            --ec-muted: #746466;
-        }
-
-        html, body, [data-testid="stAppViewContainer"], .stApp {
-            background: var(--ec-bg) !important;
-            color: var(--ec-text) !important;
-        }
-
-        [data-testid="stAppViewContainer"] > .main {
-            background:
-                radial-gradient(circle at 92% 0%, rgba(168, 7, 20, 0.04), transparent 25rem),
-                var(--ec-bg) !important;
-        }
-
-        [data-testid="stHeader"] {
-            height: 3.25rem !important;
-            background: rgba(255, 255, 255, 0.98) !important;
-            border-top: 3px solid var(--ec-red) !important;
-            border-bottom: 1px solid var(--ec-border) !important;
-            box-shadow: 0 2px 10px rgba(69, 18, 23, 0.05) !important;
-        }
-
-        [data-testid="stToolbar"],
-        [data-testid="stDecoration"],
-        [data-testid="stStatusWidget"] {
-            color: #7f1019 !important;
-        }
-
-        .block-container {
-            width: min(100%, 1160px) !important;
-            max-width: 1160px !important;
-            /* Keep the branded header below Streamlit's fixed top toolbar. */
-            padding: 4.35rem 1.35rem 2rem !important;
-        }
-
-        .main [data-testid="stVerticalBlock"] {
-            gap: 0.72rem !important;
-        }
-
-        /* Compact, readable typography */
-        .stApp h1, .stApp h2, .stApp h3,
-        .stApp h4, .stApp h5, .stApp h6 {
-            color: var(--ec-text) !important;
-            letter-spacing: -0.025em;
-        }
-
-        .stApp h1 {
-            font-size: clamp(1.8rem, 2.5vw, 2.35rem) !important;
-        }
-
-        .stApp h2 {
-            font-size: clamp(1.45rem, 2vw, 1.9rem) !important;
-            margin-top: 0.65rem !important;
-            margin-bottom: 0.2rem !important;
-        }
-
-        .stApp h3 {
-            font-size: clamp(1.15rem, 1.5vw, 1.4rem) !important;
-        }
-
-        [data-testid="stMarkdownContainer"] p,
-        [data-testid="stCaptionContainer"],
-        .stCaption {
-            color: #67595b !important;
-        }
-
-        [data-testid="stCaptionContainer"],
-        .stCaption {
-            font-size: 0.86rem !important;
-            line-height: 1.45 !important;
-        }
-
-        /* Ensure plain Streamlit status text stays dark on the light theme. */
-        [data-testid="stText"],
-        [data-testid="stText"] p,
-        [data-testid="stText"] span,
-        [data-testid="stText"] div {
-            color: #2f2526 !important;
-        }
-
-        /* Branded page header */
-        .ec-topbar {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 0.85rem;
-            padding: 0.72rem 0.9rem;
-            margin: 0 0 0.85rem 0;
-            background: var(--ec-card);
-            border: 1px solid var(--ec-border);
-            border-top: 3px solid var(--ec-red);
-            border-radius: 0 0 12px 12px;
-            box-shadow: 0 5px 16px rgba(74, 20, 25, 0.055);
-        }
-
-        .ec-brand-wrap {
-            display: flex;
-            align-items: center;
-            gap: 0.72rem;
-            min-width: 0;
-        }
-
-        .ec-logo-box {
-            width: 40px;
-            height: 40px;
-            display: grid;
-            place-items: center;
-            flex: 0 0 40px;
-            border-radius: 10px;
-            background: var(--ec-red);
-            color: #ffffff !important;
-            font-weight: 800;
-            font-size: 0.67rem;
-            letter-spacing: 0.04em;
-            box-shadow: 0 4px 10px rgba(168, 7, 20, 0.18);
-        }
-
-        .ec-brand-title {
-            margin: 0;
-            color: var(--ec-red) !important;
-            font-size: clamp(1.12rem, 1.8vw, 1.38rem);
-            line-height: 1.08;
-            font-weight: 800;
-            letter-spacing: 0.012em;
-        }
-
-        .ec-brand-subtitle {
-            margin-top: 0.13rem;
-            color: var(--ec-muted) !important;
-            font-size: 0.8rem;
-        }
-
-        .ec-status {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.4rem;
-            padding: 0.38rem 0.62rem;
-            background: var(--ec-red-soft);
-            border: 1px solid #efd1d4;
-            border-radius: 999px;
-            color: #7f1019 !important;
-            font-size: 0.73rem;
-            font-weight: 700;
-            white-space: nowrap;
-        }
-
-        .ec-status-dot {
-            width: 7px;
-            height: 7px;
-            border-radius: 50%;
-            background: #16a06a;
-            box-shadow: 0 0 0 3px rgba(22, 160, 106, 0.12);
-        }
-
-        .app-intro {
-            padding: 0.78rem 0.95rem;
-            margin: 0 0 1rem 0;
-            background: var(--ec-card);
-            border: 1px solid var(--ec-border);
-            border-left: 4px solid var(--ec-red);
-            border-radius: 10px;
-            box-shadow: 0 4px 13px rgba(74, 20, 25, 0.035);
-        }
-
-        .app-intro strong {
-            color: #7f1019 !important;
-        }
-
-        .app-intro p {
-            margin: 0.05rem 0 0.18rem 0;
-            line-height: 1.4;
-        }
-
-        /* Custom compact step headings */
-        .ec-section-heading {
-            display: flex;
-            align-items: center;
-            gap: 0.65rem;
-            margin: 1.05rem 0 0.18rem;
-        }
-
-        .ec-section-badge {
-            display: grid;
-            place-items: center;
-            width: 34px;
-            height: 34px;
-            flex: 0 0 34px;
-            border-radius: 9px;
-            background: linear-gradient(180deg, #b51220, #8f0b17);
-            color: #ffffff !important;
-            font-size: 1rem;
-            font-weight: 800;
-            box-shadow: 0 4px 10px rgba(168, 7, 20, 0.17);
-        }
-
-        .ec-section-title {
-            color: var(--ec-text) !important;
-            font-size: clamp(1.45rem, 2.15vw, 1.95rem);
-            line-height: 1.15;
-            font-weight: 800;
-            letter-spacing: -0.03em;
-        }
-
-        .ec-section-copy {
-            margin: 0 0 0.72rem 2.95rem;
-            color: #7d7072 !important;
-            font-size: 0.87rem;
-            line-height: 1.45;
-        }
-
-        /* Sidebar: narrower on desktop, automatic overlay on small screens */
-        [data-testid="stSidebar"] {
-            min-width: 270px !important;
-            max-width: 270px !important;
-            background: #fffafa !important;
-            border-right: 1px solid var(--ec-border) !important;
-        }
-
-        [data-testid="stSidebar"] > div {
-            background: #fffafa !important;
-            padding-top: 0.75rem !important;
-        }
-
-        [data-testid="stSidebar"] * {
-            color: #3d3031 !important;
-        }
-
-        [data-testid="stSidebar"] h1,
-        [data-testid="stSidebar"] h2,
-        [data-testid="stSidebar"] h3 {
-            color: #8f0b17 !important;
-        }
-
-        [data-testid="stSidebar"] hr {
-            border-color: var(--ec-border) !important;
-            margin: 0.8rem 0 !important;
-        }
-
-        [data-testid="stSidebar"] [data-testid="stCaptionContainer"] {
-            font-size: 0.8rem !important;
-        }
-
-        /* Cards, expanders and metrics */
-        [data-testid="stExpander"],
-        [data-testid="stForm"],
-        [data-testid="stMetric"],
-        div[data-testid="stVerticalBlockBorderWrapper"] {
-            background: var(--ec-card) !important;
-            border-color: var(--ec-border) !important;
-            border-radius: 10px !important;
-            box-shadow: 0 3px 10px rgba(74, 20, 25, 0.032) !important;
-        }
-
-        [data-testid="stExpander"] details,
-        [data-testid="stExpander"] summary {
-            background: var(--ec-card) !important;
-            color: #3d3031 !important;
-        }
-
-        [data-testid="stExpander"] summary {
-            padding-top: 0.65rem !important;
-            padding-bottom: 0.65rem !important;
-        }
-
-        [data-testid="stMetricValue"] {
-            color: #8f0b17 !important;
-            font-size: 1.05rem !important;
-        }
-
-        [data-testid="stMetricLabel"] {
-            color: var(--ec-muted) !important;
-            font-size: 0.78rem !important;
-        }
-
-        /* Inputs */
-        input, textarea,
-        [data-baseweb="input"] > div,
-        [data-baseweb="textarea"] > div,
-        [data-baseweb="select"] > div,
-        [data-baseweb="base-input"],
-        [data-testid="stNumberInput"] input {
-            background: #ffffff !important;
-            color: var(--ec-text) !important;
-            border-color: #d9c5c7 !important;
-        }
-
-        input::placeholder, textarea::placeholder {
-            color: #9b8a8c !important;
-            opacity: 1 !important;
-        }
-
-        [data-baseweb="popover"],
-        [data-baseweb="menu"],
-        [role="listbox"] {
-            background: #ffffff !important;
-            color: var(--ec-text) !important;
-        }
-
-        [role="option"]:hover {
-            background: #fbecee !important;
-        }
-
-        /* File uploader: shorter and better proportioned */
-        div[data-testid="stFileUploader"] {
-            padding: 0.15rem 0 !important;
-        }
-
-        [data-testid="stFileUploaderDropzone"] {
-            min-height: 72px !important;
-            background: #ffffff !important;
-            border: 1.5px dashed #c98f95 !important;
-            border-radius: 10px !important;
-            padding: 0.65rem 0.8rem !important;
-        }
-
-        [data-testid="stFileUploaderDropzone"] * {
-            color: #57494b !important;
-        }
-
-        [data-testid="stFileUploaderDropzone"] button {
-            background: #fff7f7 !important;
-            color: #8f0b17 !important;
-            border: 1px solid #c98f95 !important;
-            min-height: 36px !important;
-        }
-
-        [data-testid="stFileUploaderDropzone"] button:hover {
-            background: #fbe8ea !important;
-            border-color: var(--ec-red) !important;
-        }
-
-        /* Buttons */
-        [data-testid="stBaseButton-primary"],
-        div.stButton > button[kind="primary"],
-        div.stDownloadButton > button[kind="primary"] {
-            min-height: 40px !important;
-            background: var(--ec-red) !important;
-            color: #ffffff !important;
-            border: 1px solid var(--ec-red) !important;
-            border-radius: 8px !important;
-            font-weight: 700 !important;
-            box-shadow: 0 4px 10px rgba(168, 7, 20, 0.15) !important;
-        }
-
-        [data-testid="stBaseButton-primary"] *,
-        div.stButton > button[kind="primary"] *,
-        div.stDownloadButton > button[kind="primary"] * {
-            color: #ffffff !important;
-        }
-
-        [data-testid="stBaseButton-primary"]:hover,
-        div.stButton > button[kind="primary"]:hover,
-        div.stDownloadButton > button[kind="primary"]:hover {
-            background: var(--ec-red-dark) !important;
-            border-color: var(--ec-red-dark) !important;
-        }
-
-        [data-testid="stBaseButton-secondary"],
-        div.stButton > button:not([kind="primary"]),
-        div.stDownloadButton > button:not([kind="primary"]) {
-            min-height: 38px !important;
-            background: #ffffff !important;
-            color: #8f0b17 !important;
-            border: 1px solid #d7aeb2 !important;
-            border-radius: 8px !important;
-            font-weight: 650 !important;
-        }
-
-        [data-testid="stBaseButton-secondary"] *,
-        div.stButton > button:not([kind="primary"]) *,
-        div.stDownloadButton > button:not([kind="primary"]) * {
-            color: #8f0b17 !important;
-        }
-
-        /* Radio, checkbox, slider, progress */
-        [data-baseweb="radio"] div[aria-checked="true"],
-        [data-baseweb="checkbox"] div[aria-checked="true"],
-        [role="checkbox"][aria-checked="true"] {
-            background-color: var(--ec-red) !important;
-            border-color: var(--ec-red) !important;
-        }
-
-        [data-testid="stSlider"] [role="slider"] {
-            background: var(--ec-red) !important;
-            border-color: var(--ec-red) !important;
-        }
-
-        [data-testid="stProgress"] > div > div > div > div {
-            background-color: var(--ec-red) !important;
-        }
-
-        [data-testid="stAlert"] {
-            background: #ffffff !important;
-            color: #3d3031 !important;
-            border: 1px solid var(--ec-border) !important;
-            border-left: 4px solid var(--ec-red) !important;
-        }
-
-        [data-testid="stCode"], pre, code {
-            background: #f8f1f2 !important;
-            color: #4b3033 !important;
-            border-color: var(--ec-border) !important;
-        }
-
-        hr {
-            border: 0 !important;
-            border-top: 1px solid #e5d4d6 !important;
-            margin: 1.05rem 0 !important;
-        }
-
-        /* Keep highlighted/selected text readable in Safari and other browsers. */
-        .stApp ::selection {
-            background: #cfe3ff !important;
-            color: #171717 !important;
-            -webkit-text-fill-color: #171717 !important;
-        }
-
-        .stApp ::-moz-selection {
-            background: #cfe3ff !important;
-            color: #171717 !important;
-        }
-
-        /* Large desktop */
-        @media (min-width: 1500px) {
-            .block-container {
-                max-width: 1240px !important;
-            }
-        }
-
-        /* Laptop / tablet */
-        @media (max-width: 1100px) {
-            [data-testid="stSidebar"] {
-                min-width: 245px !important;
-                max-width: 245px !important;
-            }
-
-            .block-container {
-                width: 100% !important;
-                max-width: 100% !important;
-                padding-left: 1rem !important;
-                padding-right: 1rem !important;
-            }
-        }
-
-        /* Mobile */
-        @media (max-width: 760px) {
-            .block-container {
-                /* Streamlit keeps the toolbar fixed on narrow screens too. */
-                padding: 4.1rem 0.75rem 1.5rem !important;
-            }
-
-            .ec-topbar {
-                align-items: flex-start;
-                flex-direction: column;
-                padding: 0.65rem 0.75rem;
-            }
-
-            .ec-status {
-                margin-left: 2.95rem;
-            }
-
-            .app-intro {
-                padding: 0.7rem 0.8rem;
-            }
-
-            .ec-section-heading {
-                gap: 0.52rem;
-                margin-top: 0.85rem;
-            }
-
-            .ec-section-badge {
-                width: 30px;
-                height: 30px;
-                flex-basis: 30px;
-                border-radius: 8px;
-                font-size: 0.9rem;
-            }
-
-            .ec-section-title {
-                font-size: 1.35rem;
-            }
-
-            .ec-section-copy {
-                margin-left: 0;
-                font-size: 0.82rem;
-            }
-
-            [data-testid="stFileUploaderDropzone"] {
-                min-height: 64px !important;
-                padding: 0.55rem !important;
-            }
-        }
-
-        /* ===========================================================
-           THEME-PROOF READABILITY  (single-file: no config.toml needed)
-           Streamlit paints widget labels, alert bodies, code tokens and
-           expander contents from ITS OWN theme. If that theme resolves to
-           dark — system preference, browser setting or host default — they
-           render white-on-white against this light app. Rather than chase
-           each element, force readable ink on everything first, then
-           restore the few places that are meant to be light or coloured.
-           ORDER MATTERS: the catch-all must come before the exceptions.
-           =========================================================== */
-
-        /* 1. Catch-all ink. `color` only — NOT -webkit-text-fill-color,
-              which would also flatten colour emoji into dark silhouettes. */
-        .stApp, .stApp *, [data-testid="stSidebar"] * {
-            color: #2f2526 !important;
-        }
-
-        /* 2. Light surfaces, so forced-dark ink never lands on a dark box. */
-        [data-testid="stJson"], [data-testid="stAlert"],
-        [data-testid="stAlertContainer"], [data-testid="stNotification"],
-        [data-testid="stExpander"], [data-testid="stExpanderDetails"],
-        [data-testid="stDataFrame"], [data-testid="stTable"],
-        [data-baseweb="popover"], [data-baseweb="menu"], [role="listbox"] {
-            background-color: #ffffff !important;
-        }
-        [data-testid="stCode"], pre, code {
-            background-color: #f8f1f2 !important;
-        }
-
-        /* 3. Form controls need the fill colour too (Safari / autofill). */
-        input, textarea,
-        [data-testid="stNumberInput"] input,
-        [data-testid="stTextArea"] textarea,
-        [data-baseweb="base-input"] input {
-            color: #2f2526 !important;
-            -webkit-text-fill-color: #2f2526 !important;
-            background-color: #ffffff !important;
-        }
-        input::placeholder, textarea::placeholder {
-            color: #9b8a8c !important;
-            -webkit-text-fill-color: #9b8a8c !important;
-        }
-
-        /* 4. EXCEPTIONS — everything that is meant to be light or coloured. */
-        .ec-logo-box, .ec-logo-box *,
-        .ec-section-badge, .ec-section-badge * {
-            color: #ffffff !important;
-        }
-        .ec-brand-title { color: var(--ec-red) !important; }
-        .ec-brand-subtitle { color: var(--ec-muted) !important; }
-        .ec-status, .ec-status * { color: #7f1019 !important; }
-        .app-intro strong { color: #7f1019 !important; }
-        .ec-section-copy { color: #7d7072 !important; }
-        [data-testid="stMetricValue"] { color: #8f0b17 !important; }
-        [data-testid="stMetricLabel"] { color: var(--ec-muted) !important; }
-        [data-testid="stSidebar"] h1,
-        [data-testid="stSidebar"] h2,
-        [data-testid="stSidebar"] h3 { color: #8f0b17 !important; }
-        [data-testid="stCaptionContainer"],
-        [data-testid="stCaptionContainer"] *,
-        .stCaption { color: #67595b !important; }
-
-        [data-testid="stBaseButton-primary"],
-        [data-testid="stBaseButton-primary"] *,
-        div.stButton > button[kind="primary"],
-        div.stButton > button[kind="primary"] *,
-        div.stDownloadButton > button[kind="primary"],
-        div.stDownloadButton > button[kind="primary"] * {
-            color: #ffffff !important;
-        }
-        [data-testid="stBaseButton-secondary"],
-        [data-testid="stBaseButton-secondary"] *,
-        div.stButton > button:not([kind="primary"]),
-        div.stButton > button:not([kind="primary"]) *,
-        div.stDownloadButton > button:not([kind="primary"]),
-        div.stDownloadButton > button:not([kind="primary"]) * {
-            color: #8f0b17 !important;
-        }
-        .stApp a, .stApp a * {
-            color: #8f0b17 !important;
-            text-decoration: underline;
-        }
-        [data-baseweb="tooltip"], [data-baseweb="tooltip"] * {
-            background: #2f2526 !important;
-            color: #ffffff !important;
-        }
-
-        /* 5. A disabled button must still read as disabled, not invisible. */
-        button:disabled, button:disabled * {
-            color: #9b8a8c !important;
-            background: #f4eded !important;
-            border-color: #e5d4d6 !important;
-            cursor: not-allowed !important;
-        }
-
-        /* A plain, friendly help box */
-        .ec-help {
-            padding: 0.7rem 0.9rem;
-            margin: 0.4rem 0 0.8rem 0;
-            background: #fffdfd;
-            border: 1px solid var(--ec-border);
-            border-left: 4px solid #16a06a;
-            border-radius: 10px;
-            color: #3d3031 !important;
-            font-size: 0.88rem;
-            line-height: 1.5;
-        }
-
-        /* ===========================================================
-           6. ALWAYS-VISIBLE SCROLLBARS FOR PREVIEW AREAS
-           macOS (and iOS) draw "overlay" scrollbars: invisible until
-           the moment you actually scroll. A preview box therefore looks
-           like a dead end — the reader sees the first screenful and has
-           no signal that more text exists below. -webkit-appearance:none
-           opts out of the overlay style and pins a real, permanent bar
-           in the app's own colours. scrollbar-width/-color do the same
-           on Firefox.
-           =========================================================== */
-
-        .stApp, .stApp *, [data-testid="stSidebar"] * {
-            scrollbar-width: thin;
-            scrollbar-color: #cf9aa0 #f4ebec;
-        }
-
-        .stApp ::-webkit-scrollbar,
-        .stApp *::-webkit-scrollbar,
-        [data-testid="stSidebar"] ::-webkit-scrollbar {
-            -webkit-appearance: none !important;
-            width: 11px !important;
-            height: 11px !important;
-        }
-
-        .stApp ::-webkit-scrollbar-track,
-        .stApp *::-webkit-scrollbar-track,
-        [data-testid="stSidebar"] ::-webkit-scrollbar-track {
-            background: #f4ebec !important;
-            border-radius: 8px !important;
-        }
-
-        .stApp ::-webkit-scrollbar-thumb,
-        .stApp *::-webkit-scrollbar-thumb,
-        [data-testid="stSidebar"] ::-webkit-scrollbar-thumb {
-            background: #cf9aa0 !important;
-            border: 2px solid #f4ebec !important;
-            border-radius: 8px !important;
-        }
-
-        .stApp ::-webkit-scrollbar-thumb:hover,
-        .stApp *::-webkit-scrollbar-thumb:hover {
-            background: var(--ec-red) !important;
-        }
-
-        .stApp ::-webkit-scrollbar-corner,
-        .stApp *::-webkit-scrollbar-corner {
-            background: #f4ebec !important;
-        }
-
-        /* Preview frames. Streamlit's own `height=` argument does the
-           bounding and the scrolling now, so this only paints the frame —
-           no CSS max-height, which would fight it and produce two nested
-           scrollbars. */
-        [data-testid="stCode"] {
-            border: 1px solid var(--ec-border) !important;
-            border-radius: 10px !important;
-        }
-
-        [data-testid="stCode"] pre {
-            margin-bottom: 0 !important;
-        }
-
-        [data-testid="stTextArea"] textarea {
-            overflow: auto !important;
-            resize: vertical !important;   /* drag the corner for more room */
-        }
-
-        /* Generic helper for any custom scrolling block. */
-        .ec-scroll {
-            max-height: 420px;
-            overflow: auto;
-            padding: 0.6rem 0.8rem;
-            background: #ffffff;
-            border: 1px solid var(--ec-border);
-            border-radius: 10px;
-        }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
 
 def scroll_box(height: int = 420, border: bool = True):
     """A fixed-height panel whose content scrolls inside it.
@@ -1076,135 +386,6 @@ def code_block(text: str, language: str = "json", height: int = 460):
         with scroll_box(height):
             st.code(text, language=language)
 
-
-st.markdown(
-    """
-    <div class="ec-topbar">
-        <div class="ec-brand-wrap">
-            <div class="ec-logo-box">BUET</div>
-            <div>
-                <div class="ec-brand-title">BUET E-COUNCIL</div>
-                <div class="ec-brand-subtitle">OCR Document Processor</div>
-            </div>
-        </div>
-        <div class="ec-status">
-            <span class="ec-status-dot"></span>
-            OCR service ready
-        </div>
-    </div>
-
-    <div class="app-intro">
-        <p><strong>Turn a scanned meeting document into text and a structured record.</strong></p>
-        <p><b>Step 1</b> — upload your PDF and press <b>Read the document</b>.
-           <b>Step 2</b> — press <b>Create the meeting record</b> to turn that text into JSON.</p>
-        <p>Everything is already set up. The only thing you need to choose is what kind
-           of document you have, in the panel on the left.</p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-with st.sidebar:
-    st.header("📄 Document options")
-    st.caption("The reading service is already set up for you.")
-
-    document_kind = st.radio(
-        "What kind of document is this?",
-        [
-            "Modern printed document",
-            "Old, faded or handwritten document",
-        ],
-        help=(
-            "This single choice sets everything else for you: how much the page "
-            "images are cleaned up, and how many pages are read at a time."
-        ),
-    )
-    is_old_document = document_kind.startswith("Old")
-    degraded_scan = is_old_document  # kept for the processing-details panel
-    preprocess_profile = "degraded" if is_old_document else "standard"
-    recommended_pages_per_batch = 1 if is_old_document else 4
-
-    st.caption(
-        "Reading **one page at a time** with extra image cleanup. Slower, but the "
-        "most accurate setting for difficult handwriting."
-        if is_old_document
-        else "Reading **4 pages at a time**. A good balance of speed and accuracy."
-    )
-
-    st.divider()
-    st.caption("The recommended settings work well for most documents.")
-
-    with st.expander("⚙️ Advanced settings", expanded=False):
-        st.caption("Change these only when you understand their effect.")
-
-        model_name = st.text_input(
-            "Gemini model",
-            value=MODEL_NAME,
-            help="The model used to read the document and build the meeting record.",
-        )
-
-        ocr_mode_choice = st.radio(
-            "OCR processing method",
-            ["High-DPI page images (recommended)", "Raw PDF chunks"],
-            help="Image mode is more accurate for scans. Raw PDF mode usually costs less for clean documents.",
-        )
-        input_mode = "images" if ocr_mode_choice.startswith("High") else "pdf"
-
-        if input_mode == "images" and not PIL_AVAILABLE:
-            st.warning(
-                "Pillow is not installed, so contrast enhancement is unavailable. "
-                "Run: pip install pillow"
-            )
-
-        ocr_dpi = st.slider(
-            "Image quality (DPI)",
-            min_value=200,
-            max_value=400,
-            value=OCR_IMAGE_DPI,
-            step=50,
-            help="Higher DPI can improve small or faded text but increases cost and payload size.",
-        )
-        chunk_size = st.slider(
-            "Pages read at a time",
-            min_value=1,
-            max_value=40,
-            value=recommended_pages_per_batch,
-            step=1,
-            key=f"pages_per_batch_{preprocess_profile}",
-            help=(
-                "Fewer pages at a time is more accurate, because the model sees less "
-                "at once and cannot copy details between pages. More pages is faster "
-                "and cheaper. Changing the document type above resets this."
-            ),
-        )
-        use_text_layer = st.checkbox(
-            "Use embedded PDF text when available",
-            value=True,
-            help="Only genuinely digital pages are extracted locally (free). Scanned pages — including scans that hide a legacy OCR layer — always go to Gemini.",
-        )
-        json_chunk_chars = st.slider(
-            "Text size per request",
-            min_value=30_000,
-            max_value=100_000,
-            value=JSON_CHUNK_CHARS,
-            step=10_000,
-            help="Lower this if a very long meeting comes out incomplete.",
-        )
-        max_workers = st.slider(
-            "Parallel requests",
-            min_value=1,
-            max_value=24,
-            value=DEFAULT_MAX_WORKERS,
-            help="Controls how many requests may overlap. The RPM limit still controls request starts.",
-        )
-        safe_rpm = st.number_input(
-            "Request limit per minute",
-            min_value=1,
-            max_value=1000,
-            value=DEFAULT_SAFE_RPM,
-            step=1,
-            help="Set this to a safe per-project RPM for the configured Gemini projects.",
-        )
 
 def _unique_api_keys(candidates: list) -> list:
     """Return configured, non-empty API keys in order, with duplicates removed."""
@@ -1516,7 +697,7 @@ def extract_text_layer_pages(pdf_bytes: bytes):
 
     usable_pages   {0-based page index: text} — pages whose embedded text is
                    genuine document text (a digitally created PDF). Extracting
-                   these locally is free and character-perfect.
+                   these locally avoids an AI request but still needs review.
     rejected_pages {0-based page index: reason} — pages that DO carry text but
                    whose text cannot be trusted, so Gemini must read them.
 
@@ -1537,7 +718,7 @@ def extract_text_layer_pages(pdf_bytes: bytes):
     src = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:
         for index, page in enumerate(src):
-            text = (page.get_text("text") or "").strip()
+            text = (page.get_text("text", sort=True) or "").strip()
 
             coverage = _page_image_coverage(page)
             if coverage >= SCANNED_PAGE_IMAGE_COVERAGE:
@@ -1594,6 +775,12 @@ def extract_text_layer_pages(pdf_bytes: bytes):
                     "(a scrambled scan layer)"
                 )
                 continue
+            try:
+                if hasattr(page, "find_tables") and page.find_tables().tables:
+                    rejected[index] = "tabular layout needs visual reading to preserve columns"
+                    continue
+            except Exception:
+                pass  # Older PyMuPDF releases may not support table detection.
             pages[index] = text
     finally:
         src.close()
@@ -1660,45 +847,26 @@ class ChunkTooLargeError(OCRIncompleteError):
 
 
 def _native_raster_dpi(page) -> float:
-    """Resolution of the scan actually embedded in this page, in DPI.
-
-    A scanned page holds one raster image; rendering it above that resolution
-    only interpolates. Both sample corpora are 150 DPI scans, so a 300 DPI
-    render is already 2x upsampled and a 400 DPI render adds nothing but
-    payload — and payload is what triggers the quality ladder below.
-    Returns 0.0 when the page has no raster image (a digital page).
-    """
+    """Measure a dominant scan using its actual on-page bounding box."""
     try:
-        width_pt = float(page.rect.width)
-        height_pt = float(page.rect.height)
-    except Exception:
-        return 0.0
-    if width_pt <= 0 or height_pt <= 0:
-        return 0.0
-
-    best = 0.0
-    try:
-        infos = page.get_image_info()
-    except Exception:
-        return 0.0
-    for info in infos or ():
-        try:
-            px_w = float(info.get("width") or 0)
-            px_h = float(info.get("height") or 0)
-        except Exception:
-            continue
-        if px_w <= 0 or px_h <= 0:
-            continue
-        best = max(best, px_w / (width_pt / 72.0), px_h / (height_pt / 72.0))
-    return best
+        area = float(page.rect.width * page.rect.height)
+        for info in page.get_image_info():
+            x0, y0, x1, y1 = info["bbox"]
+            width, height = abs(x1 - x0), abs(y1 - y0)
+            if width * height < area * 0.60 or not width or not height:
+                continue  # A small logo must never lower the text resolution.
+            return min(info["width"] * 72 / width, info["height"] * 72 / height)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        pass
+    return 0.0
 
 
 def effective_render_dpi(page, requested_dpi: int) -> int:
-    """Clamp the requested DPI to at most 2x the page's native resolution."""
+    """Preserve scan detail while bounding pixel memory for huge-format pages."""
     native = _native_raster_dpi(page)
-    if native <= 0:
-        return int(requested_dpi)
-    return int(min(float(requested_dpi), native * 2.0))
+    dpi = min(requested_dpi, native * 2) if native > 0 else requested_dpi
+    pixel_limit_dpi = 72 * math.sqrt(24_000_000 / max(1, page.rect.width * page.rect.height))
+    return max(1, int(min(dpi, pixel_limit_dpi)))
 
 
 def _image_mime(data: bytes) -> str:
@@ -1707,61 +875,32 @@ def _image_mime(data: bytes) -> str:
 
 
 def _render_page_image(page, dpi: int, preprocess: str = "standard") -> bytes:
-    """Render one PDF page for OCR, preserving every stroke the scan contains.
-
-    Two properties matter for Bengali at this scan resolution, where the
-    difference between শ and স, or ত and ৎ, is one or two pixels wide:
-
-    1. NO LOSSY RE-ENCODE. The page is saved as PNG. Measured on this corpus
-       a 300 DPI grayscale page is 0.93 MB as PNG versus 0.90 MB as JPEG q88,
-       so the lossless path is effectively free and removes the JPEG ringing
-       that used to smear those thin strokes.
-    2. NO HISTOGRAM CLIPPING by default. autocontrast(cutoff=1) discards the
-       darkest and lightest 1% of pixels, which is where a faint matra lives.
-       The standard profile now stretches without discarding (cutoff=0); the
-       'degraded' profile keeps the aggressive clipping for stained or faded
-       handwritten pages, where it genuinely helps.
-
-    The size ladder now degrades QUALITY before it ever degrades RESOLUTION,
-    and the render DPI is clamped to the page's native resolution beforehand,
-    so a higher slider setting can no longer produce a lower-resolution image.
-    """
+    """Lossless first; gentle cleanup preserves faint strokes and vowel signs."""
     cap = int(PER_PAGE_IMAGE_MB * 1024 * 1024)
     render_dpi = effective_render_dpi(page, dpi)
+    levels = list(dict.fromkeys([render_dpi, max(1, int(render_dpi * .75)), max(1, int(render_dpi * .55))]))
     data = b""
-
-    # (dpi, encoder) — lossless first, resolution reduced only as a last resort.
-    ladder = (
-        (render_dpi, "png"),
-        (render_dpi, 92),
-        (render_dpi, 85),
-        (max(200, int(render_dpi * 0.75)), 85),
-        (180, 72),
-    )
-    for attempt_dpi, encoder in ladder:
-        if PIL_AVAILABLE:
-            pix = page.get_pixmap(dpi=attempt_dpi, colorspace=fitz.csGRAY)
-            img = Image.frombytes("L", (pix.width, pix.height), pix.samples)
-            if preprocess == "degraded":
-                # Stained/tinted background: clip it back and push ink-vs-paper
-                # separation so faint strokes survive.
-                img = ImageOps.autocontrast(img, cutoff=3)
-                img = ImageEnhance.Contrast(img).enhance(1.6)
-            else:
-                # Stretch to full range WITHOUT discarding extreme pixels.
-                img = ImageOps.autocontrast(img, cutoff=0)
+    for level in levels:
+        pix = page.get_pixmap(dpi=level, colorspace=fitz.csGRAY, alpha=False)
+        if not PIL_AVAILABLE:
+            data = pix.tobytes("png")
+            if len(data) <= cap:
+                return data
+            continue
+        img = Image.frombytes("L", (pix.width, pix.height), pix.samples)
+        img = ImageOps.autocontrast(img, cutoff=1 if preprocess == "strong" else 0)
+        if preprocess == "strong":
+            img = ImageEnhance.Contrast(img).enhance(1.3)
+        for encoder in ("PNG", 92, 85):
             buf = io.BytesIO()
-            if encoder == "png":
+            if encoder == "PNG":
                 img.save(buf, "PNG", optimize=True)
             else:
                 img.save(buf, "JPEG", quality=encoder, optimize=True)
             data = buf.getvalue()
-        else:
-            pix = page.get_pixmap(dpi=attempt_dpi, colorspace=fitz.csGRAY)
-            data = pix.tobytes("png" if encoder == "png" else "jpg")
-        if len(data) <= cap:
-            return data
-    return data  # smallest achievable — let the payload check decide
+            if len(data) <= cap:
+                return data
+    return data
 
 
 def render_chunk_page_images(
@@ -1809,13 +948,11 @@ def clean_bengali_ocr_text(text):
     value = value.replace("\u09a1\u09bc", "\u09dc")  # ড়
     value = value.replace("\u09a2\u09bc", "\u09dd")  # ঢ়
     value = value.replace("\u09af\u09bc", "\u09df")  # য়
-    # OCR stutter: a duplicated মোঃ initial ("মো মোঃ" / "মোঃ মোঃ") is never a
-    # legitimate sequence in a Bengali name — collapse it deterministically.
-    value = re.sub(r"(?<!\S)মো[ঃ:]?\s+মোঃ(?!\S)", "মোঃ", value)
     return value
 
 
 _thread_local = threading.local()
+LEGACY_SDK_LOCK = threading.RLock()
 
 
 def get_new_client(api_key: str):
@@ -1823,7 +960,10 @@ def get_new_client(api_key: str):
     client = getattr(_thread_local, "new_client", None)
     client_key = getattr(_thread_local, "new_client_key", None)
     if client is None or client_key != api_key:
-        client = genai_new.Client(api_key=api_key)
+        client = genai_new.Client(
+            api_key=api_key,
+            http_options=genai_types.HttpOptions(timeout=120_000),
+        )
         _thread_local.new_client = client
         _thread_local.new_client_key = api_key
     return client
@@ -1842,14 +982,27 @@ def get_legacy_model(api_key: str, model_name: str):
     return model
 
 
-def new_sdk_config(**kwargs):
-    """Add low-thinking configuration when supported by the installed SDK."""
-    if hasattr(genai_types, "ThinkingConfig"):
-        kwargs["thinking_config"] = genai_types.ThinkingConfig(
-            thinking_level=kwargs.pop("_thinking_level", "minimal")
+def legacy_generate(api_key, model_name, contents, generation_config):
+    # The legacy SDK has global credential configuration. Serialize all legacy
+    # calls across jobs so one user's key cannot bleed into another request.
+    with LEGACY_SDK_LOCK:
+        genai_old.configure(api_key=api_key)
+        return genai_old.GenerativeModel(model_name).generate_content(
+            contents, generation_config=generation_config, request_options={"timeout": 120}
         )
-    else:
-        kwargs.pop("_thinking_level", None)
+
+
+def new_sdk_config(**kwargs):
+    """Use the thinking control supported by the selected model family/SDK."""
+    level = kwargs.pop("_thinking_level", "minimal")
+    model = kwargs.pop("_model_name", "").lower()
+    thinking = getattr(genai_types, "ThinkingConfig", None)
+    fields = getattr(thinking, "model_fields", {})
+    if thinking and model.startswith("gemini-2.5") and "thinking_budget" in fields:
+        budget = -1 if "pro" in model else (0 if level == "minimal" else 1024)
+        kwargs["thinking_config"] = thinking(thinking_budget=budget)
+    elif thinking and "thinking_level" in fields:
+        kwargs["thinking_config"] = thinking(thinking_level=resolve_thinking_level(model, level))
     return genai_types.GenerateContentConfig(**kwargs)
 
 
@@ -1923,7 +1076,7 @@ def ocr_chunk_with_gemini(
     if input_mode == "images":
         images = render_chunk_page_images(chunk_pdf_bytes, dpi, preprocess)
         total_bytes = sum(len(img) for img in images)
-        if total_bytes > MAX_INLINE_MB * 1024 * 1024:
+        if total_bytes * 4 / 3 + len(prompt.encode("utf-8")) > MAX_INLINE_MB * 1024 * 1024:
             if expected_pages > 1:
                 # Raised BEFORE any request — bulletproof splits the chunk.
                 raise ChunkTooLargeError(
@@ -1944,6 +1097,10 @@ def ocr_chunk_with_gemini(
                 {"mime_type": _image_mime(img), "data": img} for img in images
             ]
     else:
+        if len(chunk_pdf_bytes) > MAX_INLINE_MB * 1024 * 1024:
+            if expected_pages > 1:
+                raise ChunkTooLargeError("PDF request is too large; splitting pages")
+            return ocr_chunk_with_gemini(chunk_pdf_bytes, expected_pages, key_pool, model_name, input_mode="images", dpi=dpi, preprocess=preprocess)
         if NEW_SDK:
             payload_parts = [
                 genai_types.Part.from_bytes(
@@ -1970,17 +1127,16 @@ def ocr_chunk_with_gemini(
                     # repeated prompt tokens across chunks.
                     contents=[prompt] + payload_parts,
                     config=new_sdk_config(
+                        _model_name=model_name,
                         temperature=0.0,
                         _thinking_level=resolve_thinking_level(
-                            model_name, OCR_THINKING_LEVEL
+                            model_name, getattr(key_pool, "ocr_thinking", OCR_THINKING_LEVEL)
                         ),
                     ),
                 )
             else:
-                response = get_legacy_model(api_key, model_name).generate_content(
-                    [prompt] + payload_parts,
-                    generation_config={"temperature": 0.0},
-                )
+                response = legacy_generate(api_key, model_name, [prompt] + payload_parts,
+                                           {"temperature": 0.0})
 
             text = (response.text or "").strip()
             if not text:
@@ -1989,16 +1145,19 @@ def ocr_chunk_with_gemini(
                 raise OCRIncompleteError(
                     "OCR response truncated by the output-token limit"
                 )
+            actual_markers = [int(m.group(1)) for m in PAGE_MARKER_RE.finditer(text)]
             missing = missing_page_numbers(text, expected_pages)
-            if missing:
+            if actual_markers != list(range(1, expected_pages + 1)):
                 raise OCRIncompleteError(
-                    f"OCR output is missing page marker(s) {missing} "
+                    f"OCR page markers are missing, repeated, or out of order: {actual_markers}; missing {missing}. "
                     f"out of {expected_pages} expected page(s)"
                 )
             key_pool.record_success(api_key)
             return text
 
         except OCRIncompleteError as e:
+            if expected_pages > 1:
+                raise  # Reduce visual context immediately instead of retrying a large batch.
             last_error = e
             attempt += 1
             if attempt < OCR_ATTEMPTS:
@@ -2342,343 +1501,6 @@ def replace_page_text(text: str, page_no: int, new_page_text: str) -> str:
         return text[: marker.start()] + new_page_text.strip() + ("\n\n" if tail else "") + tail
     return text
 
-
-# ==========================================
-# Main UI
-# ==========================================
-st.markdown(
-    """
-    <div class="ec-section-heading">
-        <div class="ec-section-badge">1</div>
-        <div class="ec-section-title">Extract text from the document</div>
-    </div>
-    <div class="ec-section-copy">
-        Upload a PDF and press Read the document. Every page is checked automatically.
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-uploaded_pdf = st.file_uploader(
-    "Choose a PDF document",
-    type=["pdf"],
-    help="Supported format: PDF",
-)
-
-if uploaded_pdf is not None:
-    file_col, size_col = st.columns(2)
-    file_col.metric("Selected file", uploaded_pdf.name)
-    size_col.metric("File size", f"{uploaded_pdf.size / (1024 * 1024):.1f} MB")
-
-    # Job key ties resume-state to the exact PDF content and OCR settings.
-    uploaded_pdf_bytes = uploaded_pdf.getvalue()
-    pdf_digest = hashlib.sha256(uploaded_pdf_bytes).hexdigest()[:20]
-    mode_tag = (
-        f"{input_mode}{ocr_dpi if input_mode == 'images' else ''}_{preprocess_profile}"
-        + ("_tl" if use_text_layer else "")
-    )
-    job_key = f"ocr_{pdf_digest}_{chunk_size}_{model_name}_{mode_tag}"
-    resuming = (
-        st.session_state.get("job_key") == job_key
-        and st.session_state.get("chunks_done")
-        and not st.session_state.get("job_complete", False)
-    )
-
-    button_label = "🔁 Continue reading" if resuming else "🚀 Read the document"
-    if st.button(button_label, type="primary", use_container_width=True):
-        if not api_key:
-            st.error("The reading service is not set up yet. Please ask the administrator to finish setting it up.")
-            st.stop()
-
-        with st.spinner("Preparing the document..."):
-            try:
-                chunks, total_pages = split_pdf_into_chunks(uploaded_pdf_bytes, chunk_size)
-            except Exception as e:
-                st.error(f"Failed to read PDF: {e}")
-                st.stop()
-
-        total_chunks = len(chunks)
-        mode_desc = (
-            f"high-DPI page images ({ocr_dpi} DPI, grayscale + "
-            + ("degraded-scan cleanup" if degraded_scan else "contrast")
-            + ")"
-            if input_mode == "images"
-            else "raw PDF chunks"
-        )
-        st.success(
-            f"Ready — {total_pages} page(s) will be read in {total_chunks} batch(es)."
-        )
-        # Initialize / reset resume state for a new file.
-        if st.session_state.get("job_key") != job_key:
-            st.session_state["job_key"] = job_key
-            st.session_state["chunks_done"] = {}
-            st.session_state["job_complete"] = False
-
-        chunks_done = st.session_state["chunks_done"]
-
-        # FREE PATH: pages with a TRUSTWORTHY embedded text layer are
-        # extracted locally. A chunk whose entire page range qualifies never
-        # touches the API. Scanned pages that merely carry a hidden legacy OCR
-        # layer are deliberately excluded — see extract_text_layer_pages.
-        if use_text_layer:
-            with st.spinner("Checking the document..."):
-                text_layer_pages, rejected_layer_pages = extract_text_layer_pages(
-                    uploaded_pdf_bytes
-                )
-            if text_layer_pages:
-                local_chunks = 0
-                local_pages = 0
-                for idx, (start, end, _bytes) in enumerate(chunks):
-                    if idx in chunks_done:
-                        continue
-                    if all(p in text_layer_pages for p in range(start - 1, end)):
-                        parts = [
-                            f"=== PAGE {p} ===\n"
-                            + clean_bengali_ocr_text(text_layer_pages[p - 1])
-                            for p in range(start, end + 1)
-                        ]
-                        chunks_done[idx] = (start, end, "\n\n".join(parts))
-                        local_chunks += 1
-                        local_pages += end - start + 1
-        progress = st.progress(len(chunks_done) / total_chunks)
-        status = st.empty()
-        failed_chunks = []
-
-        _skip_keys = remembered_exhausted_keys()
-        key_pool = APIKeyPool(api_keys, int(safe_rpm), unavailable=_skip_keys)
-        pending = [
-            (idx, start, end, chunk_bytes)
-            for idx, (start, end, chunk_bytes) in enumerate(chunks)
-            if idx not in chunks_done
-        ]
-
-        def run_ocr(item):
-            idx, start, end, chunk_bytes = item
-            expected = end - start + 1
-            text = ocr_chunk_bulletproof(
-                chunk_bytes, expected, key_pool, model_name,
-                input_mode=input_mode, dpi=int(ocr_dpi),
-                preprocess=preprocess_profile,
-            )
-            text = renumber_pages(clean_bengali_ocr_text(text), start)
-            return idx, start, end, text
-
-        if pending:
-            with ThreadPoolExecutor(max_workers=min(max_workers, len(pending))) as executor:
-                future_map = {
-                    executor.submit(run_ocr, item): item for item in pending
-                }
-                for future in as_completed(future_map):
-                    idx, start, end, _ = future_map[future]
-                    try:
-                        idx, start, end, text = future.result()
-                        chunks_done[idx] = (start, end, text)
-                    except Exception as e:
-                        print(f"read failed, pages {start}-{end}: {e}")  # server log
-                        reason = str(e).strip().replace("\n", " ")
-                        if len(reason) > 300:
-                            reason = reason[:300] + "…"
-                        st.error(
-                            f"Pages {start}–{end} could not be read. Press "
-                            "🔁 Continue reading to try them again.\n\n"
-                            f"Reason: {reason or type(e).__name__}"
-                        )
-                        failed_chunks.append((idx + 1, start, end))
-
-                    processed = len(chunks_done) + len(failed_chunks)
-                    progress.progress(min(1.0, processed / total_chunks))
-                    status.text(
-                        f"Read {min(processed * chunk_size, total_pages)} of "
-                        f"{total_pages} page(s)..."
-                    )
-
-        progress.progress(1.0)
-        st.session_state["job_complete"] = (
-            len(chunks_done) == total_chunks and not failed_chunks
-        )
-
-        if failed_chunks:
-            status.text(f"Finished with {len(failed_chunks)} failed chunk(s) ⚠️")
-            st.warning(
-                "These pages could not be read: "
-                + ", ".join(f"{s}–{e}" for _c, s, e in failed_chunks)
-                + ". Press 🔁 Continue reading to try just those again."
-            )
-        else:
-            status.text("Done ✅")
-
-        combined_parts = []
-        for i in range(total_chunks):
-            if i in chunks_done:
-                combined_parts.append(chunks_done[i][2])
-            else:
-                s_pg, e_pg, _bytes = chunks[i]
-                combined_parts.append(
-                    f"[PAGES {s_pg}–{e_pg} COULD NOT BE READ — press Continue reading to try again]"
-                )
-        combined = "\n\n".join(combined_parts)
-
-        # Illegible-word report: the prompt writes [?] instead of guessing.
-        unreadable = combined.count("[?]")
-        if unreadable:
-            st.info(
-                f"**{unreadable}** word(s) could not be read clearly and are marked "
-                "**[?]** in the text instead of being guessed. Search for '[?]' and "
-                "fill those in from the document."
-            )
-
-        # Whole-document audit: every absolute page marker must be present exactly.
-        if st.session_state["job_complete"]:
-            found_pages = pages_in_text(combined)
-            absolute_missing = [
-                n for n in range(1, total_pages + 1) if n not in found_pages
-            ]
-            if absolute_missing:
-                st.session_state["job_complete"] = False
-                st.warning(
-                    "Some page(s) are missing from the text: "
-                    + ", ".join(map(str, absolute_missing))
-                    + ". Press 🔁 Continue reading to try them again."
-                )
-            else:
-                st.success(
-                    f"All {total_pages} page(s) were read and checked ✅"
-                )
-
-        # Deterministic duplicate-affiliation audit (catches attention-drift
-        # errors like two deans sharing the same faculty).
-        consistency_issues = ocr_consistency_report(combined)
-        if consistency_issues:
-            st.warning(
-                f"⚠️ {len(consistency_issues)} attendee line(s) look like they may have "
-                "been copied from a neighbouring entry. Worth a quick check."
-            )
-            with st.expander("Show the lines to check", expanded=False):
-                with scroll_box(300):
-                    st.markdown("- " + "\n- ".join(consistency_issues))
-
-        # Page-boundary audit: catches an item number lost in a damaged margin
-        # followed by silent renumbering of the rest of the list.
-        boundary_issues = page_boundary_item_report(combined)
-        if boundary_issues:
-            st.warning(
-                f"⚠️ {len(boundary_issues)} page(s) may have lost an item number at the "
-                "page edge. The app re-reads those pages on their own to check."
-            )
-            with st.expander("Show the pages to check", expanded=False):
-                with scroll_box(300):
-                    st.markdown(
-                        "- "
-                        + "\n- ".join(issue["message"] for issue in boundary_issues)
-                    )
-
-            # AUTO CROSS-CHECK: renumbering happens because the model remembers
-            # the previous page's last item number ("after ৭ comes ৮") and that
-            # counting prior outvotes an ambiguous digit. Re-OCR the flagged
-            # page in ISOLATION — with no previous page in context there is no
-            # counting bias, so the isolated read reports the printed numbers
-            # faithfully. If the two reads disagree, the isolated one wins.
-            if st.session_state.get("job_complete") and api_keys:
-                for issue in boundary_issues:
-                    flagged_page = issue["page"]
-                    try:
-                        solo_bytes = extract_single_page_pdf(
-                            uploaded_pdf_bytes, flagged_page
-                        )
-                        solo_text = ocr_chunk_bulletproof(
-                            solo_bytes, 1, key_pool, model_name,
-                            input_mode=input_mode, dpi=int(ocr_dpi),
-                            preprocess=preprocess_profile,
-                        )
-                        solo_text = renumber_pages(
-                            clean_bengali_ocr_text(solo_text), flagged_page
-                        )
-                        old_numbers = page_item_numbers(combined, flagged_page)
-                        new_numbers = page_item_numbers(solo_text, flagged_page)
-                        if old_numbers and new_numbers and old_numbers != new_numbers:
-                            combined = replace_page_text(
-                                combined, flagged_page, solo_text
-                            )
-                            st.info(
-                                f"🔧 Page {flagged_page} was re-read in isolation "
-                                f"(no cross-page counting bias): its printed item "
-                                f"numbers came back as {new_numbers} instead of "
-                                f"{old_numbers}. The isolated read was adopted — "
-                                f"it reflects what is actually on the page."
-                            )
-                        elif old_numbers and new_numbers:
-                            st.caption(
-                                f"Isolated re-read of page {flagged_page} produced "
-                                f"the same item numbers {old_numbers} — the "
-                                "numbering is consistent across two independent "
-                                "reads; only the margin question remains."
-                            )
-                    except Exception as repair_error:
-                        st.caption(
-                            f"Isolated re-read of page {flagged_page} failed "
-                            f"({repair_error}) — verify that page manually."
-                        )
-
-        remember_exhausted_keys(key_pool)
-        st.session_state["ocr_result"] = combined
-        # Keep the editable preview synchronized with the newly completed OCR.
-        st.session_state["ocr_editor"] = combined
-        st.session_state["ocr_filename"] = uploaded_pdf.name.rsplit(".", 1)[0]
-
-# ==========================================
-# Download section (persists after rerun)
-# ==========================================
-if "ocr_result" in st.session_state:
-    st.divider()
-    st.subheader("✅ Extracted text")
-    base_name = st.session_state.get("ocr_filename", "ocr_output")
-    st.download_button(
-        "Download extracted text (.txt)",
-        data=st.session_state["ocr_result"],
-        file_name=f"{base_name}_ocr.txt",
-        mime="text/plain",
-    )
-    st.download_button(
-        "Download as Markdown (.md)",
-        data=st.session_state["ocr_result"],
-        file_name=f"{base_name}_ocr.md",
-        mime="text/markdown",
-    )
-    with st.expander("Preview extracted text", expanded=False):
-        # Older saved sessions may have an OCR result but no editor state yet.
-        if "ocr_editor" not in st.session_state:
-            st.session_state["ocr_editor"] = st.session_state["ocr_result"]
-
-        st.caption(
-            f"{len(st.session_state['ocr_editor']):,} characters — "
-            "edit the text below, then press Apply edits. "
-            "Drag its bottom-right corner to make it taller."
-        )
-        st.text_area(
-            "Combined OCR output",
-            height=400,
-            key="ocr_editor",
-        )
-
-        if st.button(
-            "✅ Apply edits",
-            key="apply_ocr_edits",
-            type="primary",
-        ):
-            st.session_state["ocr_result"] = st.session_state["ocr_editor"]
-
-            # Any existing JSON belongs to the text before this edit. Clear only
-            # the JSON-stage cache so the next record uses the corrected text.
-            for state_key in (
-                "json_job_key",
-                "json_partials_done",
-                "json_job_complete",
-                "json_result",
-            ):
-                st.session_state.pop(state_key, None)
-
-            st.success("Edits applied. Step 2 will use the corrected text.")
-            st.rerun()
 
 # ============================================================
 # STAGE 2 (TAILORED): OCR TEXT → MEETING-MINUTES JSON
@@ -3436,23 +2258,31 @@ EXTRACTION_RULES = """You are extracting structured data from the minutes of an 
 
 
 def split_text_with_overlap(full_text: str, max_chars: int = JSON_CHUNK_CHARS):
-    """Split at '=== PAGE n ===' markers with a 1-page overlap between chunks,
-    so an agenda item cut at a boundary is seen whole by the next chunk."""
-    pages = re.split(r"(?=^=== PAGE \d+ ===\s*$)", full_text, flags=re.MULTILINE)
-    pages = [p for p in pages if p.strip()]
-    if len(pages) <= 1:  # no markers — hard-split
-        return [full_text[i : i + max_chars] for i in range(0, len(full_text), max_chars)] or [full_text]
-
-    chunks, current, prev_page = [], "", ""
-    for page in pages:
-        if current and len(current) + len(page) > max_chars:
-            chunks.append(current)
-            current = prev_page + page  # overlap: repeat last page of previous chunk
-        else:
-            current += page
-        prev_page = page
-    if current.strip():
-        chunks.append(current)
+    """Bound every request, preferring page/paragraph breaks with limited overlap."""
+    if max_chars < 256:
+        raise ValueError("Text chunk size must be at least 256 characters")
+    if not full_text:
+        return [full_text]
+    chunks, start = [], 0
+    overlap = min(1800, max_chars // 8)
+    while start < len(full_text):
+        end = min(start + max_chars, len(full_text))
+        if end < len(full_text):
+            lower = start + max_chars // 2
+            page_breaks = [m.start() for m in PAGE_MARKER_RE.finditer(full_text, lower, end)]
+            boundary = page_breaks[-1] if page_breaks else full_text.rfind("\n\n", lower, end)
+            if boundary <= lower:
+                boundary = full_text.rfind("\n", lower, end)
+            if boundary > lower:
+                end = boundary
+        chunks.append(full_text[start:end])
+        if end == len(full_text):
+            break
+        next_start = max(start + 1, end - overlap)
+        newline = full_text.find("\n", next_start, end)
+        if newline >= 0:
+            next_start = newline + 1
+        start = next_start
     return chunks
 
 
@@ -3473,8 +2303,6 @@ def _validated_meeting_partial(parsed):
     Raises ValueError on any structural problem so the caller retries the
     request instead of silently caching a broken partial.
     """
-    if isinstance(parsed, list):
-        parsed = next((item for item in parsed if isinstance(item, dict)), None)
     if not isinstance(parsed, dict):
         raise ValueError("model returned non-object JSON")
 
@@ -3490,9 +2318,15 @@ def _validated_meeting_partial(parsed):
     elif not isinstance(agenda, list):
         raise ValueError("'agenda' is not a list")
 
+    for field in ("title", "date", "type", "status", "description", "president", "conclusion"):
+        if parsed.get(field) is not None and not isinstance(parsed[field], str):
+            raise ValueError(f"'{field}' must be text or null")
     for person in parsed["presentees"]:
         if not isinstance(person, dict):
             raise ValueError("a presentee entry is not an object")
+        for field in ("name", "prefix", "designation", "department", "office"):
+            if person.get(field) is not None and not isinstance(person[field], str):
+                raise ValueError(f"presentee '{field}' must be text or null")
 
     for item in parsed["agenda"]:
         if not isinstance(item, dict):
@@ -3500,6 +2334,8 @@ def _validated_meeting_partial(parsed):
         body = item.get("body")
         if not isinstance(body, str) or not body.strip():
             raise ValueError("an agenda entry is missing its 'body'")
+        if item.get("resolution") is not None and not isinstance(item["resolution"], str):
+            raise ValueError("agenda resolution must be text or null")
         serial = item.get("serial")
         if isinstance(serial, str):
             digits = re.sub(
@@ -3507,6 +2343,8 @@ def _validated_meeting_partial(parsed):
             )
             item["serial"] = int(digits) if digits else None
 
+    if not any(parsed.get(f) for f in ("title", "date", "description", "president", "conclusion", "presentees", "agenda")):
+        raise ValueError("model returned an empty meeting object")
     return _deep_clean_strings(parsed)
 
 
@@ -3535,6 +2373,7 @@ def gemini_extract_meeting(
                     model=model_name,
                     contents=prompt,
                     config=new_sdk_config(
+                        _model_name=model_name,
                         temperature=0.0,
                         response_mime_type="application/json",
                         response_schema=MEETING_SCHEMA,
@@ -3545,9 +2384,8 @@ def gemini_extract_meeting(
                 )
                 raw = response.text or ""
             else:
-                model = get_legacy_model(api_key, model_name)
-                response = model.generate_content(
-                    prompt,
+                response = legacy_generate(
+                    api_key, model_name, prompt,
                     generation_config={
                         "temperature": 0.0,
                         "response_mime_type": "application/json",
@@ -3557,12 +2395,16 @@ def gemini_extract_meeting(
                 raw = response.text or ""
 
             raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
+            if _response_truncated(response):
+                raise JSONIncompleteError("JSON output was truncated")
             if not raw:
                 raise ValueError("empty JSON response")
             result = _validated_meeting_partial(json.loads(raw))
             key_pool.record_success(api_key)
             return result
 
+        except JSONIncompleteError:
+            raise
         except (json.JSONDecodeError, ValueError) as e:
             # Invalid or truncated JSON → retry; lower the JSON-chunk slider
             # if a chunk keeps failing this way.
@@ -3949,6 +2791,13 @@ def meeting_quality_report(meeting: dict) -> list:
     if isinstance(date, str) and not ISO_DATE_RE.fullmatch(date):
         issues.append(f"'date' is not valid ISO 8601: {date!r}")
 
+    if isinstance(date, str) and ISO_DATE_RE.fullmatch(date):
+        try:
+            datetime.fromisoformat(date)
+        except ValueError:
+            issues.append("The meeting date is not a real calendar date; verify it against the PDF")
+    if "[?]" in json.dumps(meeting, ensure_ascii=False):
+        issues.append("Unreadable characters [?] remain in the record; review these against the PDF")
     presentees = meeting.get("presentees") or []
     if not presentees:
         issues.append("no presentees were extracted")
@@ -4670,307 +3519,921 @@ def format_agenda_content_as_html(meeting: dict) -> dict:
     formatted["agenda"] = formatted_agenda
     return formatted
 
-# ==========================================
-# Stage 2 UI
-# ==========================================
-st.divider()
-st.markdown(
-    """
-    <div class="ec-section-heading">
-        <div class="ec-section-badge">2</div>
-        <div class="ec-section-title">Create the meeting record</div>
-    </div>
-    <div class="ec-section-copy">
-        Turns the text from Step 1 into a structured meeting record you can
-        download. You can also paste in text of your own.
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
 
-with st.expander("What this step does", expanded=False):
-    st.markdown(
-        """
-        - Pulls out the meeting details, the attendee list and every agenda item.
-        - Matches departments and offices to their official names where it can, and
-          leaves anything uncertain exactly as written.
-        - Keeps tables and lettered sub-points formatted.
-        - Checks the finished record and tells you what to verify.
-        """
-    )
 
-source_choice = st.radio(
-    "Choose the text source",
-    ["Use the text from Step 1", "Upload or paste my own text"],
-    horizontal=True,
-)
+# ============================================================
+# Reliable processing, saved results, and restart recovery
+# ============================================================
+PIPELINE_VERSION = "ecouncil-2026-09-v2"
+CACHE_ROOT = Path(os.getenv("ECOUNCIL_CACHE_DIR", str(Path(__file__).resolve().parent / "processed_cache")))
+PDF_LOCK = threading.RLock()
+MAX_CACHE_BYTES = 50 * 1024 * 1024
 
-manual_text = ""
-if source_choice.startswith("Upload"):
-    txt_file = st.file_uploader(
-        "Upload extracted text (.txt / .md)",
-        type=["txt", "md"],
-        key="txt_up",
-    )
 
-    # Keep manually pasted text in session state so it survives Streamlit reruns.
-    # When a different text file is uploaded, load it into the same editable box
-    # exactly once; afterwards the user can continue editing it normally.
-    if "manual_json_text" not in st.session_state:
-        st.session_state["manual_json_text"] = ""
+class JSONIncompleteError(Exception):
+    """Structured output reached its token limit and needs smaller sections."""
 
-    if txt_file is not None:
-        uploaded_bytes = txt_file.getvalue()
-        uploaded_signature = hashlib.sha256(uploaded_bytes).hexdigest()
-        if st.session_state.get("manual_json_upload_signature") != uploaded_signature:
-            st.session_state["manual_json_text"] = uploaded_bytes.decode(
-                "utf-8", errors="replace"
-            )
-            st.session_state["manual_json_upload_signature"] = uploaded_signature
 
-    manual_text = st.text_area(
-        "Paste or edit the extracted meeting text here",
-        height=350,
-        key="manual_json_text",
-        placeholder=(
-            "Paste the complete OCR/extracted meeting text here. "
-            "Then press Create the meeting record."
-        ),
-    )
+def stable_digest(value) -> str:
+    raw = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
 
-current_json_source = (
-    manual_text
-    if source_choice.startswith("Upload")
-    else st.session_state.get("ocr_result", "")
-)
 
-with st.expander("Optional: improve faculty-name spelling", expanded=False):
-    st.caption(
-        "Paste faculty names — one per line, or SQL INSERT statements containing "
-        "the names as quoted strings. An OCR'd attendee name within close edit "
-        "distance of exactly one roster entry is replaced by that exact spelling "
-        "(e.g. শওকতয়ার্দী → সরওয়ার্দী). Very different names and ambiguous "
-        "matches between two people are left unchanged, and every applied "
-        "correction is listed for review."
-    )
-    roster_file = st.file_uploader(
-        "Upload roster (.txt / .sql)", type=["txt", "sql"], key="roster_up"
-    )
-    roster_prefill = (
-        roster_file.read().decode("utf-8", errors="replace") if roster_file else ""
-    )
-    roster_raw = st.text_area(
-        "...or paste roster here", value=roster_prefill, height=140, key="roster_text"
-    )
+def job_identity(stage, source_digest, settings):
+    settings = {k: v for k, v in settings.items() if k not in ("workers", "safe_rpm")}
+    rules = CHUNK_PROMPT if stage == "ocr" else (EXTRACTION_RULES + json.dumps(MEETING_SCHEMA, sort_keys=True))
+    return stable_digest({"version": PIPELINE_VERSION, "stage": stage, "source": source_digest, "settings": settings, "rules": stable_digest(rules)})
 
-roster_names = parse_name_roster(roster_raw)
-if roster_names:
-    st.caption(
-        f"Roster loaded ✅ — {len(roster_names)} unique names will be used to "
-        "correct close OCR variants."
-    )
 
-json_job_key = None
-json_resuming = False
-if current_json_source.strip():
-    json_digest = hashlib.sha256(current_json_source.encode("utf-8")).hexdigest()[:20]
-    json_job_key = f"json_{json_digest}_{int(json_chunk_chars)}_{model_name}"
-    json_resuming = (
-        st.session_state.get("json_job_key") == json_job_key
-        and bool(st.session_state.get("json_partials_done"))
-        and not st.session_state.get("json_job_complete", False)
-    )
+def atomic_json_write(path, data):
+    """Each writer gets a unique temporary file; replace is atomic on one disk."""
+    temp_path = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, prefix=".pending-", suffix=".tmp", delete=False) as stream:
+            temp_path = Path(stream.name)
+            json.dump(data, stream, ensure_ascii=False, allow_nan=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_path, path)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
-json_button_label = (
-    "🔁 Continue building the record" if json_resuming
-    else "🧠 Create the meeting record"
-)
 
-_step_two_ready = bool(current_json_source.strip())
-if not _step_two_ready:
-    st.markdown(
-        "<div class='ec-help'>Step 2 unlocks once Step 1 has produced text. Read a document above, or switch the source to <b>Upload or paste my own text</b> and provide your own.</div>",
-        unsafe_allow_html=True,
-    )
+def read_json_file(path):
+    try:
+        if path.stat().st_size > MAX_CACHE_BYTES:
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return None
 
-if st.button(
-    json_button_label,
-    type="primary",
-    use_container_width=True,
-    disabled=not _step_two_ready,
-):
-    # Deterministic Bengali cleanup also protects manually pasted text.
-    full_text = clean_bengali_ocr_text(current_json_source)
 
-    if not full_text.strip():
-        st.error("There is no text yet. Read a document in Step 1, or paste your own text.")
-        st.stop()
-    if not api_key:
-        st.error("The reading service is not set up yet. Please ask the administrator to finish setting it up.")
-        st.stop()
-    if "COULD NOT BE READ — press Continue reading" in full_text:
-        st.warning(
-            "Some pages could not be read in Step 1, so the record will be missing "
-            "that content. Finish reading the document first."
-        )
+def marker_sequence(text):
+    return [int(m.group(1)) for m in PAGE_MARKER_RE.finditer(text or "")]
 
-    chunks = split_text_with_overlap(full_text, int(json_chunk_chars))
-    total = len(chunks)
 
-    if st.session_state.get("json_job_key") != json_job_key:
-        st.session_state["json_job_key"] = json_job_key
-        st.session_state["json_partials_done"] = {}
-        st.session_state["json_job_complete"] = False
-        st.session_state.pop("json_result", None)
+def valid_ocr(text, start, end):
+    return isinstance(text, str) and marker_sequence(text) == list(range(start, end + 1)) and "COULD NOT BE READ — press Continue reading" not in text
 
-    partials_done = st.session_state["json_partials_done"]
-    pending_items = [
-        (i, chunk)
-        for i, chunk in enumerate(chunks)
-        if i not in partials_done
-    ]
 
-    st.info(
-        f"Working through the document in {total} section(s); "
-        f"{len(pending_items)} still to do."
-    )
-    progress = st.progress(len(partials_done) / total)
-    status = st.empty()
-    failed = []
-    key_pool = APIKeyPool(
-        api_keys, int(safe_rpm), unavailable=remembered_exhausted_keys()
-    )
+def make_entry(stage, key, source_digest, settings, payload, **metadata):
+    return {"version": PIPELINE_VERSION, "stage": stage, "key": key,
+            "source_digest": source_digest, "settings": settings,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "complete": True, "payload": payload, "payload_digest": stable_digest(payload),
+            **metadata}
 
-    def run_json(item):
-        i, chunk = item
-        result = gemini_extract_meeting(
-            chunk,
-            i + 1,
-            total,
-            key_pool,
-            model_name,
-        )
-        return i, result
 
-    if pending_items:
-        with ThreadPoolExecutor(
-            max_workers=min(max_workers, len(pending_items))
-        ) as executor:
-            future_map = {
-                executor.submit(run_json, item): item[0]
-                for item in pending_items
-            }
-            completed_this_run = 0
-            for future in as_completed(future_map):
-                i = future_map[future]
+def entry_valid(entry, stage, key):
+    if not isinstance(entry, dict) or entry.get("version") != PIPELINE_VERSION:
+        return False
+    if entry.get("key") != key or entry.get("stage") != stage or entry.get("complete") is not True:
+        return False
+    try:
+        if job_identity(stage, entry["source_digest"], entry["settings"]) != key:
+            return False
+        payload = entry["payload"]
+        if entry.get("payload_digest") != stable_digest(payload):
+            return False
+        if stage == "ocr":
+            return type(entry.get("pages")) is int and entry["pages"] > 0 and valid_ocr(payload, 1, entry["pages"])
+        if not isinstance(payload, dict) or not all(isinstance(payload.get(k), list) for k in ("presentees", "agenda")):
+            return False
+        _validated_meeting_partial(copy.deepcopy(payload))
+        return True
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+
+
+def cache_relative(stage, key):
+    return f"v2/{stage}/{key}.json"
+
+
+def load_entry(stage, key, imported=None):
+    entry = (imported or {}).get(cache_relative(stage, key))
+    if entry_valid(entry, stage, key):
+        return entry
+    entry = read_json_file(CACHE_ROOT / cache_relative(stage, key))
+    return entry if entry_valid(entry, stage, key) else None
+
+
+def save_entry(entry):
+    return atomic_json_write(CACHE_ROOT / cache_relative(entry["stage"], entry["key"]), entry)
+
+
+def checkpoint_path(stage, key, part):
+    return CACHE_ROOT / "checkpoints" / stage / key / f"{part}.json"
+
+
+def load_checkpoint(stage, key, part):
+    saved = read_json_file(checkpoint_path(stage, key, part))
+    if isinstance(saved, dict) and saved.get("key") == key and saved.get("checksum") == stable_digest(saved.get("payload")):
+        return saved.get("payload")
+    return None
+
+
+def save_checkpoint(stage, key, part, payload):
+    return atomic_json_write(checkpoint_path(stage, key, part), {"key": key, "payload": payload, "checksum": stable_digest(payload)})
+
+
+def safe_error(error, keys=()):
+    message = str(error)
+    for key in keys:
+        if key:
+            message = message.replace(key, "[hidden]")
+    message = re.sub(r"AIza[\w-]+", "[hidden]", message)
+    upper = message.upper()
+    if "429" in upper or "RESOURCE_EXHAUSTED" in upper:
+        return "The Gemini request limit was reached. Wait for the quota to reset, then resume. Completed work is saved."
+    if "401" in upper or "403" in upper or "API KEY" in upper:
+        return "Gemini could not authorize this request. Check the configured API key and its permissions."
+    if "404" in upper or "NOT_FOUND" in upper:
+        return "The selected model was not found. Check the Gemini model name in Advanced settings."
+    if "TIMEOUT" in upper:
+        return "The request timed out. Resume to retry the unfinished section."
+    return message[:320] or type(error).__name__
+
+
+# PyMuPDF calls are serialized; network requests still run concurrently.
+# Separate documents are used for each operation and never shared by threads.
+def locked_pdf_function(function):
+    def wrapper(*args, **kwargs):
+        with PDF_LOCK:
+            return function(*args, **kwargs)
+    return wrapper
+
+
+for _pdf_function_name in ("split_pdf_into_chunks", "render_chunk_page_images", "_split_pdf_bytes_in_half", "extract_single_page_pdf", "extract_text_layer_pages"):
+    globals()[_pdf_function_name] = locked_pdf_function(globals()[_pdf_function_name])
+
+
+def pdf_metadata(data):
+    with PDF_LOCK, fitz.open(stream=data, filetype="pdf") as document:
+        if document.needs_pass:
+            raise ValueError("This PDF is password protected. Upload an unlocked copy.")
+        if len(document) == 0:
+            raise ValueError("This PDF has no pages.")
+        return {"pages": len(document), "bytes": len(data)}
+
+
+def page_pdf(data, start, end):
+    with PDF_LOCK, fitz.open(stream=data, filetype="pdf") as source, fitz.open() as part:
+        part.insert_pdf(source, from_page=start - 1, to_page=end - 1)
+        return part.tobytes(garbage=1, deflate=True)
+
+
+def pdf_preview(data, page_number):
+    with PDF_LOCK, fitz.open(stream=data, filetype="pdf") as document:
+        page = document[page_number - 1]
+        scale = min(1.5, 1200 / max(page.rect.width, page.rect.height))
+        return page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False).tobytes("png")
+
+
+class ProcessingJob:
+    """Background workers do not call Streamlit or mutate session state."""
+    def __init__(self, stage, key, source_digest, settings):
+        self.id = uuid.uuid4().hex
+        self.stage, self.key = stage, key
+        self.source_digest, self.settings = source_digest, dict(settings)
+        self.lock = threading.RLock()
+        self.pause = threading.Event()
+        self.status = "running"
+        self.started = time.monotonic()
+        self.finished = None
+        self.total = self.done = self.restored = self.local = 0
+        self.message = "Preparing the document…"
+        self.errors = {}
+        self.notes = []
+        self.result = None
+        self.partial = ""
+
+    def note(self, message):
+        with self.lock:
+            if message not in self.notes:
+                self.notes.append(message)
+
+    def snapshot(self):
+        with self.lock:
+            return {k: copy.copy(getattr(self, k)) for k in (
+                "id", "stage", "key", "status", "started", "finished", "total", "done",
+                "restored", "local", "message", "errors", "notes", "result", "partial")}
+
+    def run(self, function, *args):
+        try:
+            function(self, *args)
+        except Exception as error:
+            with self.lock:
+                self.errors["Document"] = safe_error(error, args[-1] if args and isinstance(args[-1], list) else [])
+                self.status = "paused" if self.pause.is_set() else "failed"
+        finally:
+            with self.lock:
+                self.finished = time.monotonic()
+                if self.status == "running":
+                    self.status = "paused" if self.pause.is_set() else "failed"
+
+
+@st.cache_resource(show_spinner=False)
+def job_registry():
+    return {"lock": threading.Lock(), "jobs": {}}
+
+
+def start_job(job, function, *args):
+    registry = job_registry()
+    with registry["lock"]:
+        for previous in registry["jobs"].values():
+            if previous.key == job.key and previous.stage == job.stage and previous.status == "running" and not previous.pause.is_set():
+                return previous.id  # Reconnect to the same work after a browser refresh.
+        for job_id, previous in list(registry["jobs"].items()):
+            if previous.finished and time.monotonic() - previous.finished > 3600:
+                registry["jobs"].pop(job_id, None)
+        finished_jobs = sorted((j for j in registry["jobs"].values() if j.finished), key=lambda j: j.finished)
+        for previous in finished_jobs[:-16]:
+            registry["jobs"].pop(previous.id, None)
+        if sum(j.status == "running" for j in registry["jobs"].values()) >= 4:
+            raise ValueError("The app is processing several documents. Please try again shortly.")
+        registry["jobs"][job.id] = job
+    threading.Thread(target=job.run, args=(function, *args), daemon=True).start()
+    return job.id
+
+
+def get_active_job():
+    return job_registry()["jobs"].get(st.session_state.get("active_job_id"))
+
+
+def bounded_process(job, items, worker, accept, workers):
+    """Only hold as many page payloads/futures as there are active workers."""
+    iterator = iter(items)
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+        futures = {}
+        exhausted = False
+        while futures or not exhausted:
+            while not exhausted and not job.pause.is_set() and len(futures) < workers:
+                item = next(iterator, None)
+                if item is None:
+                    exhausted = True
+                    break
+                futures[executor.submit(worker, item)] = item
+            if job.pause.is_set():
+                exhausted = True
+            if not futures:
+                break
+            completed, _ = wait(futures, timeout=0.5, return_when=FIRST_COMPLETED)
+            for future in completed:
+                item = futures.pop(future)
                 try:
-                    result_i, result = future.result()
-                    partials_done[result_i] = result
-                except Exception as e:
-                    failed.append(i + 1)
-                    print(f"record section {i + 1} failed: {e}")  # server log
-                    st.error(f"Section {i + 1} of the document could not be processed.")
+                    accept(item, future.result())
+                except Exception as error:
+                    with job.lock:
+                        job.errors[str(item[0])] = safe_error(error)
+                    if _is_fatal_api_error(error):
+                        job.pause.set()  # do not charge for every remaining page on a bad configuration
 
-                completed_this_run += 1
-                progress.progress(len(partials_done) / total)
-                status.text(
-                    f"Processed {completed_this_run} of {len(pending_items)} "
-                    f"section(s) of the document..."
-                )
 
-    remember_exhausted_keys(key_pool)
+def run_ocr_job(job, pdf_data, reuse, keys):
+    settings = job.settings
+    total_pages = pdf_metadata(pdf_data)["pages"]
+    size = settings["chunk_size"]
+    ranges = [(start, min(start + size - 1, total_pages)) for start in range(1, total_pages + 1, size)]
+    results = {}
+    with job.lock:
+        job.total = total_pages
+        job.message = "Checking saved progress and embedded text…"
+    for start, end in ranges:
+        saved = load_checkpoint("ocr", job.key, f"{start}-{end}") if reuse else None
+        if valid_ocr(saved, start, end):
+            results[start] = saved
+            job.done += end - start + 1
+            job.restored += end - start + 1
+    # Avoid re-scanning text layers when every page is already checkpointed.
+    local_pages, _ = extract_text_layer_pages(pdf_data) if settings["use_text_layer"] and len(results) < len(ranges) else ({}, {})
+    pool = APIKeyPool(keys, settings["safe_rpm"]) if keys else None
+    if pool:
+        pool.ocr_thinking = settings["thinking"]
 
-    if not partials_done:
-        st.error("None of the document could be processed. Please try again.")
-        st.stop()
+    def worker(item):
+        start, end = item
+        pieces, page = [], start
+        while page <= end:
+            if page - 1 in local_pages:
+                pieces.append(f"=== PAGE {page} ===\n" + clean_bengali_ocr_text(local_pages[page - 1]))
+                with job.lock:
+                    job.local += 1
+                page += 1
+                continue
+            if pool is None:
+                raise ValueError("Reading scanned pages needs GEMINI_API_KEYS in Streamlit Secrets. Digital text pages and saved results can be used without a key.")
+            last = page
+            while last < end and last not in local_pages:
+                last += 1
+            raw = page_pdf(pdf_data, page, last)
+            text = ocr_chunk_bulletproof(raw, last - page + 1, pool, settings["model"],
+                                        input_mode=settings["input_mode"], dpi=settings["dpi"], preprocess=settings["preprocess"])
+            pieces.append(renumber_pages(clean_bengali_ocr_text(text), page))
+            page = last + 1
+        text = "\n\n".join(pieces)
+        if not valid_ocr(text, start, end):
+            raise OCRIncompleteError("The page sequence is incomplete or duplicated. Resume to retry.")
+        # Preserve the existing isolated-page cross-check. Report differences;
+        # never claim the second probabilistic reading proves correctness.
+        if settings["cross_check"] and pool:
+            for issue in page_boundary_item_report(text):
+                flagged = issue["page"]
+                try:
+                    solo = ocr_chunk_bulletproof(page_pdf(pdf_data, flagged, flagged), 1, pool, settings["model"],
+                                                input_mode=settings["input_mode"], dpi=settings["dpi"], preprocess=settings["preprocess"])
+                    solo = renumber_pages(clean_bengali_ocr_text(solo), flagged)
+                    old, new = page_item_numbers(text, flagged), page_item_numbers(solo, flagged)
+                    if old and new and old != new:
+                        text = replace_page_text(text, flagged, solo)
+                        job.note(f"Page {flagged}: isolated reading changed item numbers from {old} to {new}. Verify against the PDF.")
+                except Exception as error:
+                    job.note(f"Page {flagged}: the second reading could not finish; review this page manually. " + safe_error(error, keys))
+        return text
 
-    missing = [i + 1 for i in range(total) if i not in partials_done]
-    if missing:
-        st.session_state["json_job_complete"] = False
-        st.warning(
-            "The record is not complete yet — section(s) "
-            + ", ".join(map(str, missing))
-            + " still need processing. Press 🔁 Continue building the record."
-        )
-        status.text("Paused with missing chunks ⚠️")
+    def accept(item, text):
+        start, end = item
+        results[start] = text
+        if not save_checkpoint("ocr", job.key, f"{start}-{end}", text):
+            job.note("Automatic saving is unavailable on this server. Download your text or backup before leaving.")
+        with job.lock:
+            job.done += end - start + 1
+            job.message = f"{job.done} of {total_pages} pages read"
+            job.partial = "\n\n".join(results[n] for n in sorted(results))
+
+    pending = [item for item in ranges if item[0] not in results]
+    bounded_process(job, pending, worker, accept, settings["workers"] if NEW_SDK else 1)
+    combined = "\n\n".join(results[n] if n in results else f"[PAGES {n}–{end} COULD NOT BE READ — press Continue reading to try again]" for n, end in ranges)
+    with job.lock:
+        job.partial = combined
+    if len(results) != len(ranges):
+        job.status = "paused" if job.pause.is_set() else "failed"
+        return
+    if not valid_ocr(combined, 1, total_pages):
+        raise OCRIncompleteError("Document page order failed its final check.")
+    entry = make_entry("ocr", job.key, job.source_digest, settings, combined, pages=total_pages, notes=job.notes)
+    if not save_entry(entry):
+        job.note("The server could not save the finished result. Download a backup below.")
+    with job.lock:
+        job.result, job.status = entry, "complete"
+        job.message = "Text ready for review"
+
+
+def extract_json_resilient(text, index, total, pool, model, depth=0):
+    try:
+        return gemini_extract_meeting(text, index, total, pool, model)
+    except JSONIncompleteError:
+        if depth >= 3 or len(text) < 4000:
+            raise ValueError("This section still exceeds the output limit. Lower Text size per request and retry.")
+        parts = split_text_with_overlap(text, max(2000, len(text) // 2))
+        partials = [extract_json_resilient(part, index, total, pool, model, depth + 1) for part in parts]
+        return merge_meeting_partials(partials)
+
+
+def run_json_job(job, source, reuse, keys):
+    if not keys:
+        raise ValueError("Generating a new meeting record needs GEMINI_API_KEYS in Streamlit Secrets.")
+    settings = job.settings
+    chunks = split_text_with_overlap(source, settings["chunk_chars"])
+    results = {}
+    job.total = len(chunks)
+    for index, chunk in enumerate(chunks):
+        saved = load_checkpoint("json", job.key, index) if reuse else None
+        if isinstance(saved, dict):
+            try:
+                results[index] = _validated_meeting_partial(saved)
+            except (TypeError, ValueError):
+                continue
+    job.done = job.restored = len(results)
+    job.message = "Building the meeting record…"
+    pool = APIKeyPool(keys, settings["safe_rpm"])
+
+    def worker(item):
+        index, chunk = item
+        return extract_json_resilient(chunk, index + 1, len(chunks), pool, settings["model"])
+
+    def accept(item, result):
+        index, _ = item
+        results[index] = result
+        if not save_checkpoint("json", job.key, index, result):
+            job.note("Automatic saving is unavailable; keep this tab open until the record is ready.")
+        with job.lock:
+            job.done += 1
+            job.message = f"{job.done} of {len(chunks)} sections processed"
+
+    bounded_process(job, [(i, chunk) for i, chunk in enumerate(chunks) if i not in results], worker, accept, settings["workers"] if NEW_SDK else 1)
+    if len(results) != len(chunks):
+        job.status = "paused" if job.pause.is_set() else "failed"
+        return
+    partials = [results[i] for i in range(len(chunks))]
+    final = merge_meeting_partials(partials) if len(partials) > 1 else dict(partials[0])
+    final, stitch_notes = stitch_split_agenda_items(final)
+    final = normalize_meeting_entities(_finalize_scalars(final), name_roster=settings["roster"])
+    corrections = final.pop("_name_corrections", [])
+    final = format_agenda_content_as_html(final)
+    _validated_meeting_partial(copy.deepcopy(final))
+    entry = make_entry("json", job.key, job.source_digest, settings, final, stitch_notes=stitch_notes, corrections=corrections, incomplete_source="COULD NOT BE READ — press Continue reading" in source)
+    if not save_entry(entry):
+        job.note("The server could not save this record. Download a backup below.")
+    with job.lock:
+        job.result, job.status = entry, "complete"
+        job.message = "Meeting record ready"
+
+
+def make_backup(entries):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        for entry in entries:
+            if entry and entry_valid(entry, entry.get("stage"), entry.get("key")):
+                archive.writestr("processed_cache/" + cache_relative(entry["stage"], entry["key"]), json.dumps(entry, ensure_ascii=False, indent=2))
+        archive.writestr("README.txt", "Place the processed_cache folder beside your Streamlit Python file and commit it to the repository. Or restore this ZIP in the app. Use the same PDF and processing settings. Cloud runtime files are not automatically committed to GitHub.\n")
+    return output.getvalue()
+
+
+def parse_backup(data):
+    if len(data) > MAX_CACHE_BYTES:
+        raise ValueError("Backup is too large (maximum 50 MB).")
+    result = {}
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        infos = archive.infolist()
+        if len(infos) > 100 or sum(info.file_size for info in infos) > MAX_CACHE_BYTES:
+            raise ValueError("Backup has too many entries or exceeds 50 MB when opened.")
+        for info in infos:
+            match = re.fullmatch(r"processed_cache/(v2/(ocr|json)/([0-9a-f]{64})\.json)", info.filename)
+            if not match:
+                continue  # No filesystem extraction; traversal paths are never used.
+            entry = json.loads(archive.read(info))
+            if not entry_valid(entry, match[2], match[3]):
+                raise ValueError("This backup contains an invalid or incomplete record.")
+            result[match[1]] = entry
+    if not result:
+        raise ValueError("No valid processed-document results were found in this ZIP.")
+    return result
+
+
+# ============================================================
+# Interface — two deliberate steps, with review between them
+# ============================================================
+APP_CSS = """
+<style>
+:root { --ec-red:#8d2433; --ec-ink:#282d36; --ec-muted:#626b76; --ec-border:#e6e2dd; }
+[data-testid="stAppViewContainer"] { background:#f7f6f3; color:var(--ec-ink); }
+[data-testid="stHeader"] { background:rgba(247,246,243,.95); }
+[data-testid="stSidebar"] { background:#f0eeea; border-right:1px solid var(--ec-border); }
+.block-container { max-width:1220px; padding-top:2.7rem; padding-bottom:3rem; }
+h1,h2,h3 { color:var(--ec-ink); letter-spacing:-.035em; }
+h1 { font-size:2.5rem !important; line-height:1.14 !important; }
+h2 { font-size:1.6rem !important; }
+h3 { font-size:1.12rem !important; }
+.ec-eyebrow { color:var(--ec-red); font-weight:750; font-size:.72rem; letter-spacing:.16em; margin-bottom:12px; }
+.ec-subtitle { color:var(--ec-muted); font-size:1.03rem; max-width:680px; line-height:1.65; }
+.ec-header { padding:16px 0 22px; border-bottom:1px solid var(--ec-border); margin-bottom:20px; }
+.ec-topline { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.ec-pill { background:#e9f1ec; color:#266344; border:1px solid #cfdfd4; padding:6px 10px; border-radius:20px; font-size:.73rem; white-space:nowrap; }
+.ec-pill.off { background:#f1eee7; color:#736249; border-color:#e3dacc; }
+.ec-steps { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin:8px 0 26px; }
+.ec-step { padding:15px 17px; border-radius:12px; border:1px solid var(--ec-border); background:#fff; }
+.ec-step.active { border-color:#8d2433; box-shadow:inset 0 3px #8d2433; }
+.ec-step.complete { border-color:#bfd4c5; }
+.ec-step small { display:block; color:var(--ec-muted); font-size:.78rem; margin-top:5px; }
+.ec-step b { font-size:.88rem; }
+.ec-step span { color:var(--ec-red); margin-right:9px; font-size:.78rem; }
+.ec-section { display:flex; gap:10px; align-items:center; margin:25px 0 8px; }
+.ec-number { color:var(--ec-red); background:#f1e4e5; width:32px; height:32px; border-radius:9px; display:grid; place-items:center; font-weight:700; }
+.ec-section h2 { padding:0; margin:0; }
+.ec-file { background:white; border:1px solid var(--ec-border); padding:14px 17px; border-radius:10px; margin:4px 0 14px; }
+.ec-file small { display:block; color:var(--ec-muted); margin-top:5px; }
+.stButton button, .stDownloadButton button { border-radius:9px; min-height:42px; font-weight:600; }
+.stButton button[kind="primary"], [data-testid="stFormSubmitButton"] button[kind="primary"] { background:#8d2433; border-color:#8d2433; color:white; }
+.stButton button[kind="primary"]:hover { background:#701c29; border-color:#701c29; }
+.stButton button:focus-visible, textarea:focus-visible, input:focus-visible { outline:3px solid #ca9ca5 !important; outline-offset:2px; }
+[data-testid="stMetric"] { background:white; border:1px solid var(--ec-border); border-radius:10px; padding:12px 16px; }
+[data-testid="stMetricValue"] { font-size:1.5rem; color:var(--ec-ink); }
+[data-testid="stExpander"] { background:white; border-radius:10px; }
+[data-testid="stTextArea"] textarea { line-height:1.8; font-size:.96rem; resize:vertical; }
+[data-testid="stFileUploaderDropzone"] { background:#fff; border:1px dashed #baaaad; border-radius:12px; }
+[data-testid="stCaptionContainer"] { color:var(--ec-muted); }
+[data-testid="stAlert"] { border-radius:10px; }
+@media (max-width:700px) {
+ .block-container { padding:2.4rem 1rem 2rem; }
+ h1 { font-size:1.85rem !important; }
+ .ec-steps { gap:6px; }
+ .ec-step { padding:11px 9px; }
+ .ec-step small { font-size:.68rem; }
+ .ec-step b { font-size:.76rem; }
+ .ec-topline { align-items:flex-start; }
+}
+</style>
+"""
+
+
+def clear_record():
+    for name in ("json_entry", "json_result", "json_job_key", "json_job_complete", "json_partials_done", "record_source_key"):
+        st.session_state.pop(name, None)
+
+
+def set_ocr_result(entry, filename, origin):
+    st.session_state.pop("last_job_issue", None)
+    st.session_state.pop("partial_ocr", None)
+    old = st.session_state.get("ocr_result")
+    st.session_state.update(ocr_entry=entry, ocr_result=entry["payload"], ocr_editor=entry["payload"],
+                            ocr_filename=filename.rsplit(".", 1)[0], ocr_origin=origin,
+                            job_complete=True, job_key=entry["key"])
+    st.session_state["edit_revision"] = st.session_state.get("edit_revision", 0) + 1
+    if old != entry["payload"]:
+        clear_record()
+
+
+def set_json_result(entry, origin):
+    st.session_state.pop("last_job_issue", None)
+    st.session_state.update(json_entry=entry, json_result=json.dumps(entry["payload"], ensure_ascii=False, indent=4),
+                            json_origin=origin, json_job_complete=True, json_job_key=entry["key"])
+
+
+def page_blocks(text):
+    markers = list(PAGE_MARKER_RE.finditer(text or ""))
+    return {int(m.group(1)): text[m.start():markers[i + 1].start() if i + 1 < len(markers) else len(text)].strip()
+            for i, m in enumerate(markers)}
+
+
+def apply_text_edit(new_text):
+    entry = copy.deepcopy(st.session_state["ocr_entry"])
+    if not valid_ocr(new_text, 1, entry["pages"]):
+        st.error("Keep every === PAGE n === marker exactly once, in page order. Your edits have not been applied.")
+        return False
+    entry["payload"], entry["payload_digest"] = new_text, stable_digest(new_text)
+    entry["edited"] = True
+    entry["created_at"] = datetime.now(timezone.utc).isoformat()
+    if not save_entry(entry):
+        st.session_state["save_warning"] = "Edits are available in this session. Download a backup because the server could not save them."
+    st.session_state.setdefault("imported_cache", {})[cache_relative("ocr", entry["key"])] = entry
+    set_ocr_result(entry, st.session_state.get("ocr_filename", "meeting") + ".pdf", "Edited text")
+    st.session_state["flash"] = "Edits saved. The next meeting record will use the corrected text."
+    return True
+
+
+def render_sidebar(busy):
+    with st.sidebar:
+        st.markdown("**BUET E-COUNCIL**")
+        st.caption("Document workspace")
+        st.divider()
+        kind = st.radio("Document type", ["Modern printed document", "Old, faded or handwritten document"], disabled=busy)
+        old = kind.startswith("Old")
+        st.caption("One page per request helps keep difficult names and numbers in context." if old else "Digital text is read locally when suitable. Scans are read by Gemini.")
+        reuse = st.checkbox("Reuse saved results", value=True, disabled=busy,
+                            help="Return saved results for the same document and settings. Turn off for a fresh run; this may use Gemini credits.")
+        with st.expander("Advanced settings", expanded=False):
+            model = st.text_input("Gemini model", value=MODEL_NAME, disabled=busy).strip()
+            mode = st.radio("OCR processing method", ["High-DPI page images (recommended)", "Raw PDF chunks"], disabled=busy)
+            dpi = st.slider("Image quality (DPI)", 200, 400, OCR_IMAGE_DPI, 50, disabled=busy)
+            chunk_size = st.slider("Pages read at a time", 1, 40, 1 if old else 4, key=f"batch_{old}", disabled=busy)
+            layer = st.checkbox("Use embedded PDF text when available", True, disabled=busy)
+            strong = st.checkbox("Stronger contrast for badly faded scans", False, disabled=busy,
+                                   help="Try this only if gentle cleanup leaves text unreadable. Strong contrast can remove faint strokes.")
+            care = st.selectbox("Reading care", ["Quick transcription", "More reasoning"], index=1 if old else 0, key=f"care_{old}", disabled=busy,
+                                help="More reasoning may help difficult pages and can take longer. Always review uncertain names and numbers.")
+            cross_check = st.checkbox("Cross-check suspicious page boundaries", True, disabled=busy,
+                                     help="Retains isolated re-reading for pages that may have lost an item number. May make extra Gemini requests.")
+            chars = st.slider("Text size per request", 30_000, 100_000, JSON_CHUNK_CHARS, 10_000, disabled=busy)
+            workers = st.slider("Parallel requests", 1, 24, DEFAULT_MAX_WORKERS, disabled=busy,
+                                help="Four is a conservative cloud default. Higher values use more memory; the request limit still applies.")
+            rpm = st.number_input("Request limit per minute", 1, 1000, DEFAULT_SAFE_RPM, disabled=busy)
+        if not api_keys:
+            st.info("Saved results and suitable digital PDFs work now. New AI processing needs an API key in Streamlit Secrets.")
+        with st.expander("Restore a saved document", expanded=False):
+            st.caption("Upload the backup ZIP downloaded from this app, then use the same PDF and processing settings.")
+            backup = st.file_uploader("Document backup (.zip)", type=["zip"], key="backup_upload", disabled=busy)
+            if backup is not None and st.button("Restore backup", disabled=busy):
+                try:
+                    imported = parse_backup(backup.getvalue())
+                    st.session_state.setdefault("imported_cache", {}).update(imported)
+                    st.success(f"{len(imported)} saved result(s) available in this session.")
+                    for entry in imported.values():
+                        if entry["stage"] == "ocr":
+                            cfg = entry["settings"]
+                            st.caption(f"Saved settings: {cfg['model']}; {cfg['chunk_size']} page(s) per request; {cfg['dpi']} DPI; {cfg['preprocess']} cleanup.")
+                except (OSError, ValueError, zipfile.BadZipFile, RuntimeError) as error:
+                    st.error(safe_error(error))
+        st.caption("Progress is saved on this server. Download a backup to keep results through cloud redeployments.")
+    base = {"model": model, "workers": int(workers), "safe_rpm": int(rpm)}
+    ocr = dict(base, input_mode="images" if mode.startswith("High") else "pdf", dpi=dpi, chunk_size=chunk_size,
+               use_text_layer=layer, preprocess="strong" if strong else ("degraded" if old else "standard"),
+               thinking="low" if care == "More reasoning" else "minimal", cross_check=cross_check)
+    js = dict(base, chunk_chars=chars)
+    return reuse, ocr, js
+
+
+@st.fragment(run_every=1.0)
+def render_progress():
+    job = get_active_job()
+    if job is None:
+        return
+    snap = job.snapshot()
+    elapsed = (snap["finished"] or time.monotonic()) - snap["started"]
+    unit = "pages" if snap["stage"] == "ocr" else "sections"
+    if snap["status"] == "running":
+        st.progress(min(1., snap["done"] / max(1, snap["total"])), text=snap["message"])
+        st.caption(f"{snap['done']} / {snap['total'] or '…'} {unit} · {int(elapsed)//60}m {int(elapsed)%60:02d}s elapsed · {snap['restored']} restored · {snap['local']} read locally")
+        if job.pause.is_set():
+            st.info("Pausing after active batches finish. Completed work will be kept.")
+        elif st.button("Pause after current batches", key="pause_job"):
+            job.pause.set()
+            st.rerun()
+        return
+    if snap["status"] == "complete":
+        if snap["stage"] == "ocr":
+            set_ocr_result(snap["result"], st.session_state.get("uploaded_name", "meeting.pdf"), "New extraction")
+        else:
+            set_json_result(snap["result"], "New record")
+        st.session_state["flash"] = f"{'Text' if snap['stage'] == 'ocr' else 'Meeting record'} ready in {elapsed:.1f}s."
     else:
-        partials = [partials_done[i] for i in range(total)]
-        status.text("Putting the meeting record together...")
+        st.session_state["last_job_issue"] = {"stage": snap["stage"], "done": snap["done"], "total": snap["total"], "errors": snap["errors"], "status": snap["status"]}
+        if snap["stage"] == "ocr" and snap["partial"]:
+            st.session_state["partial_ocr"] = snap["partial"]
+    st.session_state["job_notes"] = snap["notes"]
+    st.session_state.pop("active_job_id", None)
+    st.rerun()
 
-        final = (
-            merge_meeting_partials(partials)
-            if len(partials) > 1
-            else dict(partials[0])
-        )
-        final, stitch_notes = stitch_split_agenda_items(final)
-        final = _finalize_scalars(final)
-        final = normalize_meeting_entities(final, name_roster=roster_names)
-        applied_corrections = final.pop("_name_corrections", [])
-        final = format_agenda_content_as_html(final)
 
-        issues = meeting_quality_report(final)
-        if issues:
-            st.warning(
-                f"⚠️ {len(issues)} thing(s) to verify against the original document "
-                "before you use this record."
-            )
-            with st.expander("Show what to verify", expanded=False):
-                with scroll_box(300):
-                    st.markdown("- " + "\n- ".join(issues))
+def legacy_ocr_entry(data, settings, page_count):
+    """Recognize the previous version's default cache without masking setting changes."""
+    expected = {"model": MODEL_NAME, "input_mode": "images", "dpi": OCR_IMAGE_DPI, "chunk_size": 4,
+                "preprocess": "standard", "use_text_layer": True, "thinking": "minimal", "cross_check": True}
+    if any(settings[k] != v for k, v in expected.items()):
+        return None
+    path = CACHE_ROOT / "ocr" / f"{stable_digest(data)}.txt"
+    try:
+        if path.stat().st_size > MAX_CACHE_BYTES:
+            return None
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    if not valid_ocr(text, 1, page_count):
+        return None
+    key = job_identity("ocr", stable_digest(data), settings)
+    return make_entry("ocr", key, stable_digest(data), settings, text, pages=page_count,
+                      notes=["Restored from the earlier app. Its original processing settings were not recorded; turn off Reuse saved results for a fresh extraction."], legacy=True)
+
+
+def legacy_json_entry(text, settings):
+    if settings["model"] != MODEL_NAME or settings["chunk_chars"] != JSON_CHUNK_CHARS:
+        return None
+    digest = stable_digest({"version": "meeting-record-v1", "source_text": text, "roster_names": settings["roster"]})
+    value = read_json_file(CACHE_ROOT / "json" / f"{digest}.json")
+    if not isinstance(value, dict) or not all(isinstance(value.get(k), list) for k in ("agenda", "presentees")):
+        return None
+    key = job_identity("json", stable_digest(text.encode("utf-8")), settings)
+    entry = make_entry("json", key, stable_digest(text.encode("utf-8")), settings, value, legacy=True)
+    return entry if entry_valid(entry, "json", key) else None
+
+
+def render_ocr_review(pdf_data, busy):
+    entry = st.session_state.get("ocr_entry")
+    if not entry:
+        return
+    text = entry["payload"]
+    blocks = page_blocks(text)
+    uncertain = [n for n, value in blocks.items() if "[?]" in value]
+    cols = st.columns(3)
+    cols[0].metric("Pages read", entry["pages"])
+    cols[1].metric("Characters", f"{len(text):,}")
+    cols[2].metric("Unclear readings", text.count("[?]"))
+    st.caption(f"{st.session_state.get('ocr_origin', 'Saved result')} · {'Edited transcription' if entry.get('edited') else 'Ready to review'}")
+    if uncertain:
+        st.warning("Review [?] on page(s): " + ", ".join(map(str, uncertain)) + ". The app kept uncertainty visible instead of filling it in.")
+    issues = ocr_consistency_report(text) + [i["message"] for i in page_boundary_item_report(text)]
+    if issues or entry.get("notes"):
+        with st.expander(f"Review notes ({len(issues) + len(entry.get('notes', []))})"):
+            for issue in issues + entry.get("notes", []):
+                st.write("• " + issue)
+    with st.expander("Review and edit extracted text", expanded=True):
+        view = st.radio("Review mode", ["Page by page", "Complete text"], horizontal=True, disabled=busy)
+        if view == "Page by page":
+            only_flagged = st.checkbox("Show only pages with [?]", False, disabled=busy or not uncertain)
+            options = uncertain if only_flagged and uncertain else list(blocks)
+            page = st.selectbox("Page", options, format_func=lambda n: f"Page {n}" + (" · needs review" if n in uncertain else ""), disabled=busy)
+            left, right = st.columns([1, 1])
+            with left:
+                st.caption("Original document")
+                if pdf_data:
+                    try:
+                        with scroll_box(440, border=False):
+                            st.image(pdf_preview(pdf_data, page), use_container_width=True)
+                    except Exception:
+                        st.info("Page preview is unavailable; check the original PDF.")
+            with right:
+                st.caption("Extracted text · save edits before changing pages")
+                with st.form(f"page_edit_{page}_{st.session_state.get('edit_revision', 0)}"):
+                    edited = st.text_area("Page text", value=blocks[page], height=400, disabled=busy)
+                    if st.form_submit_button("Save page edits", type="primary", disabled=busy):
+                        updated = replace_page_text(text, page, edited)
+                        if apply_text_edit(updated):
+                            st.rerun()
         else:
-            st.success("Everything checked out ✅ — all the key details are present.")
+            with st.form("full_text_edit"):
+                edited = st.text_area("Combined OCR output", value=text, height=440, disabled=busy)
+                if st.form_submit_button("Apply edits", type="primary", disabled=busy):
+                    if apply_text_edit(edited):
+                        st.rerun()
+    a, b = st.columns(2)
+    base = st.session_state.get("ocr_filename", "meeting")
+    a.download_button("Download text (.txt)", text, file_name=f"{base}_ocr.txt", mime="text/plain", use_container_width=True)
+    b.download_button("Download Markdown (.md)", text, file_name=f"{base}_ocr.md", mime="text/markdown", use_container_width=True)
 
-        if stitch_notes:
-            st.info(
-                f"🔧 {len(stitch_notes)} page-boundary continuation(s) were handled: "
-                "split proposal text was rejoined and repeated overlap was removed."
-            )
 
-        if applied_corrections:
-            st.info(
-                f"Roster corrections applied to {len(applied_corrections)} "
-                "attendee name(s):\n\n- " + "\n- ".join(applied_corrections)
-            )
-
-        st.session_state["json_job_complete"] = True
-        st.session_state["json_result"] = json.dumps(
-            final,
-            ensure_ascii=False,
-            indent=4,
-        )
-        status.markdown(
-            f"**Done ✅ — {len(final.get('presentees', []))} presentees, "
-            f"{len(final.get('agenda', []))} agenda items.**"
-        )
-
-if "json_result" in st.session_state:
-    st.subheader("✅ Meeting record")
-    base_name = st.session_state.get("ocr_filename", "meeting")
-    st.download_button(
-        "Download the meeting record",
-        data=st.session_state["json_result"],
-        file_name=f"{base_name}.json",
-        mime="application/json",
-    )
-    with st.expander("Preview the meeting record", expanded=False):
-        json_preview_text = st.session_state["json_result"]
-        st.caption(
-            f"{len(json_preview_text.splitlines()):,} lines — scroll inside the "
-            "box below."
-        )
-        json_view = st.radio(
-            "How would you like to see it?",
-            ["Raw text", "Collapsible tree"],
-            horizontal=True,
-            key="json_preview_view",
-            label_visibility="collapsed",
-        )
-        with_tree = json_view == "Collapsible tree"
-        if with_tree:
+def render_record():
+    entry = st.session_state.get("json_entry")
+    if not entry:
+        return
+    meeting = entry["payload"]
+    st.subheader("Meeting record")
+    if entry.get("incomplete_source"):
+        st.warning("This record was created from incomplete source text; missing pages are not represented.")
+    st.caption(st.session_state.get("json_origin", "Saved result"))
+    a, b, c = st.columns(3)
+    a.metric("Attendees", len(meeting.get("presentees", [])))
+    b.metric("Agenda items", len(meeting.get("agenda", [])))
+    issues = meeting_quality_report(meeting)
+    c.metric("Checks to review", len(issues))
+    if issues:
+        with st.expander("Check these details before using the record", expanded=True):
+            for issue in issues:
+                st.write("• " + issue)
+    else:
+        st.success("Structural checks passed. Review names, dates, and numbers against the source.")
+    for message in entry.get("corrections", []):
+        st.info("Roster correction: " + message)
+    if entry.get("stitch_notes"):
+        with st.expander("Page-boundary continuations"):
+            for note in entry["stitch_notes"]:
+                st.write(note)
+    with st.expander("Preview the meeting record", expanded=True):
+        view = st.radio("Record view", ["Summary", "Raw text", "Collapsible tree"], horizontal=True)
+        if view == "Summary":
+            st.write(meeting.get("title") or "Meeting title not found")
+            st.caption(str(meeting.get("date") or "Date not found"))
+            if meeting.get("presentees"):
+                st.dataframe(meeting["presentees"], use_container_width=True, hide_index=True)
+            st.caption("Download the JSON to get every agenda item, formatted table, and resolution.")
+        elif view == "Collapsible tree":
             with scroll_box(460):
-                try:
-                    st.json(json.loads(json_preview_text), expanded=False)
-                except json.JSONDecodeError:
-                    code_block(json_preview_text, "json", 440)
+                st.json(meeting, expanded=False)
         else:
-            code_block(json_preview_text, "json", 460)
+            code_block(st.session_state["json_result"], "json", 460)
+    st.download_button("Download meeting record (.json)", st.session_state["json_result"],
+                       file_name=st.session_state.get("ocr_filename", "meeting") + ".json", mime="application/json", use_container_width=True)
+
+
+def render_app():
+    st.markdown(APP_CSS, unsafe_allow_html=True)
+    job = get_active_job()
+    busy = job is not None  # commit a just-finished job before enabling another one
+    reuse, ocr_settings, json_settings = render_sidebar(busy)
+    status = "AI service configured" if api_keys else "Saved results & digital text"
+    badge_class = "" if api_keys else "off"
+    st.markdown(f'''<div class="ec-header"><div class="ec-topline"><div class="ec-eyebrow">BUET E-COUNCIL / DOCUMENT WORKSPACE</div><span class="ec-pill {badge_class}">{status}</span></div><h1>From minutes to meeting records.</h1><div class="ec-subtitle">Read your document, check the text, and create a structured record.<br>Two steps. Your work stays saved as you go.</div></div>''', unsafe_allow_html=True)
+    # Replaced below once the current upload has been reconciled with session state.
+    steps = st.empty()
+    if st.session_state.get("flash"):
+        st.success(st.session_state.pop("flash"))
+    if st.session_state.get("save_warning"):
+        st.warning(st.session_state.pop("save_warning"))
+    if st.session_state.get("last_job_issue"):
+        issue = st.session_state["last_job_issue"]
+        st.warning(f"{'Reading' if issue['stage'] == 'ocr' else 'Record generation'} paused with {issue['done']} of {issue['total']} completed. Keep Reuse saved results on and press the step button to continue.")
+        if issue["errors"]:
+            with st.expander("What happened"):
+                for part, error in issue["errors"].items():
+                    st.write(f"Section {part}: {error}")
+    if st.session_state.get("job_notes"):
+        with st.expander("Processing notes"):
+            for note in st.session_state["job_notes"]:
+                st.write(note)
+    if job is not None:
+        render_progress()
+    st.markdown('<div class="ec-section"><span class="ec-number">1</span><h2>Read the document</h2></div>', unsafe_allow_html=True)
+    st.caption("Upload the PDF you want to process. Previously saved results open without another AI request.")
+    uploaded = st.file_uploader("Choose a PDF document", type=["pdf"], key="source_pdf", disabled=busy)
+    pdf_data = uploaded.getvalue() if uploaded is not None else None
+    digest = stable_digest(pdf_data) if pdf_data is not None else None
+    if digest != st.session_state.get("selected_pdf_digest") and not busy:
+        for name in ("ocr_entry", "ocr_result", "ocr_editor", "partial_ocr", "last_job_issue", "job_notes", "ocr_metadata", "ocr_filename"):
+            st.session_state.pop(name, None)
+        clear_record()
+        st.session_state["selected_pdf_digest"] = digest
+    page_count = None
+    if uploaded is not None:
+        st.session_state["uploaded_name"] = uploaded.name
+        try:
+            if "ocr_metadata" not in st.session_state:
+                st.session_state["ocr_metadata"] = pdf_metadata(pdf_data)
+            page_count = st.session_state["ocr_metadata"]["pages"]
+        except Exception as error:
+            st.error("Cannot open this PDF. " + safe_error(error))
+        if page_count:
+            key = job_identity("ocr", digest, ocr_settings)
+            cached = load_entry("ocr", key, st.session_state.get("imported_cache")) if reuse else None
+            if cached is None and reuse:
+                cached = legacy_ocr_entry(pdf_data, ocr_settings, page_count)
+            if st.session_state.get("ocr_entry", {}).get("key") not in (None, key):
+                st.info("The text below was read with earlier settings. Press Read the document to use your current settings.")
+            label = "Saved text is ready" if cached else "Ready to read"
+            st.markdown(f'<div class="ec-file"><b>{html.escape(uploaded.name)}</b><small>{page_count} pages · {len(pdf_data)/1048576:.1f} MB · {label}</small></div>', unsafe_allow_html=True)
+            issue = st.session_state.get("last_job_issue", {})
+            button_label = "Continue reading" if issue.get("stage") == "ocr" and reuse else "Read the document"
+            if st.button(button_label, type="primary", use_container_width=True, disabled=busy, key="read_document"):
+                st.session_state.pop("last_job_issue", None)
+                if cached:
+                    set_ocr_result(cached, uploaded.name, "Saved result")
+                    st.session_state["flash"] = "Saved text loaded. Review it below, then create the meeting record."
+                else:
+                    new_job = ProcessingJob("ocr", key, digest, ocr_settings)
+                    try:
+                        st.session_state["active_job_id"] = start_job(new_job, run_ocr_job, pdf_data, reuse, api_keys)
+                    except ValueError as error:
+                        st.error(str(error))
+                        return
+                st.rerun()
+    render_ocr_review(pdf_data, busy)
+    if not st.session_state.get("ocr_entry") and st.session_state.get("partial_ocr"):
+        st.download_button("Download completed text so far", st.session_state["partial_ocr"], "partial_ocr.txt", "text/plain")
+    st.divider()
+    st.markdown('<div class="ec-section"><span class="ec-number">2</span><h2>Create the meeting record</h2></div>', unsafe_allow_html=True)
+    source_choice = st.radio("Choose the text source", ["Use the text from Step 1", "Upload or paste my own text"], horizontal=True, disabled=busy)
+    source = st.session_state.get("ocr_result", "")
+    if source_choice.startswith("Upload"):
+        txt = st.file_uploader("Upload extracted text (.txt / .md)", type=["txt", "md"], key="txt_up", disabled=busy)
+        if txt is not None:
+            signature = stable_digest(txt.getvalue())
+            if signature != st.session_state.get("manual_json_upload_signature"):
+                st.session_state["manual_json_text"] = txt.getvalue().decode("utf-8", errors="replace")
+                st.session_state["manual_json_upload_signature"] = signature
+        source = st.text_area("Paste or edit the extracted meeting text here", key="manual_json_text", height=260, disabled=busy)
+    with st.expander("Optional: improve faculty-name spelling"):
+        st.caption("Use a trusted roster to correct close, unambiguous name matches. Applied corrections are listed with the finished record.")
+        roster_file = st.file_uploader("Upload roster (.txt / .sql)", type=["txt", "sql"], key="roster_up", disabled=busy)
+        if roster_file is not None:
+            signature = stable_digest(roster_file.getvalue())
+            if signature != st.session_state.get("roster_signature"):
+                st.session_state["roster_text"] = roster_file.getvalue().decode("utf-8", errors="replace")
+                st.session_state["roster_signature"] = signature
+        roster = st.text_area("Faculty names, one per line, or SQL INSERT statements", key="roster_text", height=130, disabled=busy)
+    json_settings["roster"] = parse_name_roster(roster)
+    if json_settings["roster"]:
+        st.caption(f"{len(json_settings['roster'])} roster names loaded")
+    full_text = clean_bengali_ocr_text(source)
+    source_digest = stable_digest(full_text.encode("utf-8"))
+    json_key = job_identity("json", source_digest, json_settings)
+    if st.session_state.get("json_entry", {}).get("key") not in (None, json_key) and not busy:
+        clear_record()  # never show a previous document's record under new text/settings
+    ready = bool(full_text.strip())
+    incomplete = "COULD NOT BE READ — press Continue reading" in full_text
+    allow_partial = False
+    if incomplete:
+        st.warning("This text has missing pages. Finish reading it for a complete meeting record.")
+        allow_partial = st.checkbox("Create a record from this incomplete text", False, disabled=busy)
+    if not ready:
+        st.info("Complete Step 1 above, or upload/paste text to begin.")
+    json_cached = load_entry("json", json_key, st.session_state.get("imported_cache")) if ready and reuse else None
+    if json_cached is None and ready and reuse:
+        json_cached = legacy_json_entry(full_text, json_settings)
+    if json_cached:
+        st.caption("A saved meeting record is ready for this text and roster.")
+    button_label = "Continue building the record" if st.session_state.get("last_job_issue", {}).get("stage") == "json" and reuse else "Create the meeting record"
+    if st.button(button_label, type="primary", use_container_width=True, disabled=busy or not ready or (incomplete and not allow_partial), key="create_record"):
+        st.session_state.pop("last_job_issue", None)
+        if json_cached:
+            set_json_result(json_cached, "Saved result")
+            st.session_state["flash"] = "Saved meeting record loaded."
+        elif not api_keys:
+            st.error("Add GEMINI_API_KEYS in Streamlit Secrets to generate a new record.")
+            return
+        else:
+            new_job = ProcessingJob("json", json_key, source_digest, json_settings)
+            try:
+                st.session_state["active_job_id"] = start_job(new_job, run_json_job, full_text, reuse, api_keys)
+            except ValueError as error:
+                st.error(str(error))
+                return
+        st.rerun()
+    render_record()
+    entries = [st.session_state.get("ocr_entry"), st.session_state.get("json_entry")]
+    if any(entries):
+        with st.expander("Keep this document ready for your presentation"):
+            st.caption("Download a backup after both steps finish. Restore it here, or put its processed_cache folder beside your app in GitHub. Cloud-generated files are not automatically saved to your repository.")
+            st.download_button("Download document backup (.zip)", make_backup(entries),
+                               file_name=st.session_state.get("ocr_filename", "meeting") + "_backup.zip", mime="application/zip", use_container_width=True)
+    have_text, have_record = bool(st.session_state.get("ocr_entry")), bool(st.session_state.get("json_entry"))
+    states = ["complete" if have_text else "active", "complete" if have_record else ("active" if have_text else ""), "complete" if have_record else ""]
+    steps.markdown('<div class="ec-steps">' + ''.join(f'<div class="ec-step {state}"><b><span>{num}</span>{title}</b><small>{subtitle}</small></div>' for state, num, title, subtitle in zip(states, ["01", "02", "03"], ["Read", "Review", "Export"], ["PDF → extracted text", "Check names & details", "Text, JSON & backup"])) + '</div>', unsafe_allow_html=True)
+
+
+if __name__ == "__main__":
+    render_app()
