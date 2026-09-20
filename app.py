@@ -21,6 +21,14 @@ from contextlib import contextmanager
 
 import streamlit as st
 
+# Older Streamlit versions require this before accessing secrets or widgets.
+st.set_page_config(
+    page_title="BUET E-Council Document Processor",
+    page_icon="📄",
+    layout="wide",
+    initial_sidebar_state="auto",
+)
+
 try:
     import fitz  # PyMuPDF
 except ImportError:
@@ -60,7 +68,11 @@ except ImportError:
 # For local/Docker use, an optional comma-separated GEMINI_API_KEYS environment
 # variable is also supported. Real keys are never stored in this source file.
 try:
-    _secret_keys = st.secrets.get("GEMINI_API_KEYS", [])
+    # Some older releases render a red error even when FileNotFoundError is
+    # caught. Their optional loader avoids that for keyless/local-only use.
+    _secrets_loader = getattr(type(st.secrets), "load_if_toml_exists", None)
+    _secrets_available = _secrets_loader(st.secrets) if _secrets_loader else True
+    _secret_keys = st.secrets.get("GEMINI_API_KEYS", []) if _secrets_available else []
     _secret_keys = _secret_keys.split(",") if isinstance(_secret_keys, str) else list(_secret_keys)
 except Exception:
     _secret_keys = []
@@ -351,13 +363,6 @@ def chunk_prompt_for(
 # ==========================================
 # Page setup
 # ==========================================
-st.set_page_config(
-    page_title="BUET E-Council Document Processor",
-    page_icon="📄",
-    layout="wide",
-    initial_sidebar_state="auto",
-)
-
 def scroll_box(height: int = 420, border: bool = True):
     """A fixed-height panel whose content scrolls inside it.
 
@@ -874,21 +879,24 @@ def _image_mime(data: bytes) -> str:
     return "image/png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
 
 
-def _render_page_image(page, dpi: int, preprocess: str = "standard") -> bytes:
+def _render_page_image(page, dpi: int, preprocess: str = "standard", clip=None) -> bytes:
     """Lossless first; gentle cleanup preserves faint strokes and vowel signs."""
     cap = int(PER_PAGE_IMAGE_MB * 1024 * 1024)
     render_dpi = effective_render_dpi(page, dpi)
     levels = list(dict.fromkeys([render_dpi, max(1, int(render_dpi * .75)), max(1, int(render_dpi * .55))]))
     data = b""
     for level in levels:
-        pix = page.get_pixmap(dpi=level, colorspace=fitz.csGRAY, alpha=False)
+        original = preprocess == "original"
+        pix = page.get_pixmap(dpi=level, colorspace=fitz.csRGB if original else fitz.csGRAY,
+                              alpha=False, clip=clip)
         if not PIL_AVAILABLE:
             data = pix.tobytes("png")
             if len(data) <= cap:
                 return data
             continue
-        img = Image.frombytes("L", (pix.width, pix.height), pix.samples)
-        img = ImageOps.autocontrast(img, cutoff=1 if preprocess == "strong" else 0)
+        img = Image.frombytes("RGB" if original else "L", (pix.width, pix.height), pix.samples)
+        if not original:
+            img = ImageOps.autocontrast(img, cutoff=1 if preprocess == "strong" else 0)
         if preprocess == "strong":
             img = ImageEnhance.Contrast(img).enhance(1.3)
         for encoder in ("PNG", 92, 85):
@@ -912,6 +920,25 @@ def render_chunk_page_images(
         return [_render_page_image(page, dpi, preprocess) for page in src]
     finally:
         src.close()
+
+
+def render_page_detail_views(pdf_bytes, dpi, preprocess="original"):
+    """One full page and two overlapping crops; every image shows the SAME page.
+
+    Crops retain color/faint strokes by default. They supplement the full-page
+    layout and never replace it, so columns, table cells and overlap stay clear.
+    """
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as document:
+        if len(document) != 1:
+            raise ValueError("Detailed verification requires exactly one PDF page.")
+        page = document[0]
+        r = page.rect
+        crops = [fitz.Rect(r.x0, r.y0, r.x1, r.y0 + r.height * .57),
+                 fitz.Rect(r.x0, r.y0 + r.height * .43, r.x1, r.y1)]
+        return [_render_page_image(page, dpi, preprocess)] + [
+            _render_page_image(page, min(600, max(400, dpi)), preprocess, clip=crop)
+            for crop in crops
+        ]
 
 
 # OCR occasionally emits Assamese/Devanagari lookalikes or zero-width characters
@@ -1062,6 +1089,8 @@ def ocr_chunk_with_gemini(
     input_mode: str = "pdf",
     dpi: int = OCR_IMAGE_DPI,
     preprocess: str = "standard",
+    detail_views: bool = False,
+    verification: bool = False,
 ) -> str:
     """Send one chunk (as a PDF or as preprocessed page images) and VALIDATE
     the result before accepting it.
@@ -1070,11 +1099,36 @@ def ocr_chunk_with_gemini(
     output-token limit, or missing any '=== PAGE n ===' marker for the pages
     this chunk contains. Only a complete, verified transcription is returned.
     """
-    prompt = chunk_prompt_for(input_mode, expected_pages, preprocess)
+    if detail_views and expected_pages != 1:
+        raise ValueError("Detailed verification requires a single page.")
+    if detail_views:
+        input_mode = "images"
+    prompt = chunk_prompt_for("pdf" if detail_views else input_mode, expected_pages, preprocess)
+    if detail_views:
+        prompt = prompt.replace("this PDF", "these views of one page").replace("THIS PDF", "THESE VIEWS OF ONE PAGE")
+    if verification:
+        prompt += (
+            "\n\nMake an independent transcription from the attached source only. "
+            "Inspect every name, digit, date, table row, margin and footnote. "
+            "Do not infer missing text from a familiar phrase or number sequence. "
+            "Keep spelling exactly as printed, including unusual names. "
+            "Use [?] for strokes you cannot resolve. Transcribe all visible content; "
+            "do not summarize or report your reasoning."
+        )
+    if detail_views:
+        prompt += (
+            "\n\nIMAGE MAPPING: These THREE images are VIEWS OF ONE PAGE, not three pages. "
+            "Image 1 is the full page. Image 2 enlarges its upper part. Image 3 enlarges "
+            "its lower part. Images 2 and 3 overlap in the middle. Use the full image "
+            "for reading order and the crops for small strokes. Output the entire page "
+            "ONCE with exactly one === PAGE 1 === marker. Never duplicate overlapping "
+            "lines or split a table into duplicate rows."
+        )
 
     # Build payload parts ONCE, before the retry loop.
     if input_mode == "images":
-        images = render_chunk_page_images(chunk_pdf_bytes, dpi, preprocess)
+        images = (render_page_detail_views(chunk_pdf_bytes, dpi, preprocess) if detail_views
+                  else render_chunk_page_images(chunk_pdf_bytes, dpi, preprocess))
         total_bytes = sum(len(img) for img in images)
         if total_bytes * 4 / 3 + len(prompt.encode("utf-8")) > MAX_INLINE_MB * 1024 * 1024:
             if expected_pages > 1:
@@ -1100,7 +1154,9 @@ def ocr_chunk_with_gemini(
         if len(chunk_pdf_bytes) > MAX_INLINE_MB * 1024 * 1024:
             if expected_pages > 1:
                 raise ChunkTooLargeError("PDF request is too large; splitting pages")
-            return ocr_chunk_with_gemini(chunk_pdf_bytes, expected_pages, key_pool, model_name, input_mode="images", dpi=dpi, preprocess=preprocess)
+            return ocr_chunk_with_gemini(chunk_pdf_bytes, expected_pages, key_pool, model_name,
+                                       input_mode="images", dpi=dpi, preprocess=preprocess,
+                                       detail_views=detail_views, verification=verification)
         if NEW_SDK:
             payload_parts = [
                 genai_types.Part.from_bytes(
@@ -1208,6 +1264,8 @@ def ocr_chunk_bulletproof(
     input_mode: str = "pdf",
     dpi: int = OCR_IMAGE_DPI,
     preprocess: str = "standard",
+    detail_views: bool = False,
+    verification: bool = False,
 ) -> str:
     """OCR a chunk with strict validation and automatic repair.
 
@@ -1227,6 +1285,8 @@ def ocr_chunk_bulletproof(
             input_mode=input_mode,
             dpi=dpi,
             preprocess=preprocess,
+            detail_views=detail_views,
+            verification=verification,
         )
     except OCRIncompleteError:
         if expected_pages <= 1:
@@ -1238,10 +1298,12 @@ def ocr_chunk_bulletproof(
     left_text = ocr_chunk_bulletproof(
         left_bytes, left_pages, key_pool, model_name,
         input_mode=input_mode, dpi=dpi, preprocess=preprocess,
+        detail_views=detail_views, verification=verification,
     )
     right_text = ocr_chunk_bulletproof(
         right_bytes, right_pages, key_pool, model_name,
         input_mode=input_mode, dpi=dpi, preprocess=preprocess,
+        detail_views=detail_views, verification=verification,
     )
     # Shift the right half's local page numbers so 1..right_pages becomes
     # (left_pages+1)..(left_pages+right_pages) within this chunk.
@@ -3604,7 +3666,25 @@ def entry_valid(entry, stage, key):
         if entry.get("payload_digest") != stable_digest(payload):
             return False
         if stage == "ocr":
-            return type(entry.get("pages")) is int and entry["pages"] > 0 and valid_ocr(payload, 1, entry["pages"])
+            count = entry.get("pages")
+            if type(count) is not int or count <= 0 or not valid_ocr(payload, 1, count):
+                return False
+            checks = entry.get("page_checks", {})
+            if not isinstance(checks, dict):
+                return False
+            for number, check in checks.items():
+                if not str(number).isdigit() or not 1 <= int(number) <= count or not isinstance(check, dict):
+                    return False
+                if "needs_review" in check and type(check["needs_review"]) is not bool:
+                    return False
+                if not isinstance(check.get("readings", []), list) or not isinstance(check.get("differences", []), list):
+                    return False
+                for reading in check.get("readings", []):
+                    if not isinstance(reading, dict) or not isinstance(reading.get("label"), str) or not valid_ocr(reading.get("text"), int(number), int(number)):
+                        return False
+            if entry["settings"].get("accuracy_strategy") and set(checks) != {str(n) for n in range(1, count + 1)}:
+                return False
+            return True
         if not isinstance(payload, dict) or not all(isinstance(payload.get(k), list) for k in ("presentees", "agenda")):
             return False
         _validated_meeting_partial(copy.deepcopy(payload))
@@ -3671,7 +3751,7 @@ def locked_pdf_function(function):
     return wrapper
 
 
-for _pdf_function_name in ("split_pdf_into_chunks", "render_chunk_page_images", "_split_pdf_bytes_in_half", "extract_single_page_pdf", "extract_text_layer_pages"):
+for _pdf_function_name in ("split_pdf_into_chunks", "render_chunk_page_images", "render_page_detail_views", "_split_pdf_bytes_in_half", "extract_single_page_pdf", "extract_text_layer_pages"):
     globals()[_pdf_function_name] = locked_pdf_function(globals()[_pdf_function_name])
 
 
@@ -3712,6 +3792,7 @@ class ProcessingJob:
         self.message = "Preparing the document…"
         self.errors = {}
         self.notes = []
+        self.page_checks = {}
         self.result = None
         self.partial = ""
 
@@ -3797,10 +3878,101 @@ def bounded_process(job, items, worker, accept, workers):
                         job.pause.set()  # do not charge for every remaining page on a bad configuration
 
 
+ACCURACY_STRATEGY = "independent-page-views-v1"
+
+
+def reading_signature(text):
+    # Ignore layout whitespace only. Preserve punctuation, glyphs and ALL digits.
+    body = PAGE_MARKER_RE.sub("", text or "")
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFC", body)).strip()
+
+
+def reading_differences(first, second):
+    """Bound the comparison size; retain short, literal disagreements for review."""
+    a, b = reading_signature(first).split(), reading_signature(second).split()
+    differences = []
+    for tag, i, j, k, l in SequenceMatcher(None, a[:6000], b[:6000], autojunk=False).get_opcodes():
+        if tag != "equal":
+            differences.append({"First reading": " ".join(a[i:j])[:240] or "(missing)",
+                                "Other reading": " ".join(b[k:l])[:240] or "(missing)"})
+            if len(differences) >= 12:
+                break
+    return differences
+
+
+def compare_page_readings(readings, page):
+    """Agreement helps triage; it is not a correctness score or human approval."""
+    signatures = [reading_signature(text) for text in readings]
+    first, second = signatures[:2]
+    disagreed = first != second
+    selected = 0
+    reason = "Two independent readings agree."
+    if disagreed:
+        reason = "Independent readings differ; compare the highlighted details with the PDF."
+        # Prefer corroborated text only if it does not drop substantial text or
+        # numeric fields. Always retain ALL readings and flag the disagreement.
+        if len(signatures) > 2 and second == signatures[2] and second:
+            digits_a = re.findall(r"\d+", first)
+            digits_b = re.findall(r"\d+", second)
+            if len(second) >= len(first) * .9 and len(digits_b) >= len(digits_a):
+                selected = 1
+                reason = "Readings 2 and 3 agree. Their text was chosen initially; all differences remain available for review."
+        elif len(signatures) > 2 and first == signatures[2]:
+            reason = "Readings 1 and 3 agree. The first text was chosen initially; review the disagreement."
+    chosen = readings[selected]
+    blank = not signatures[selected]
+    number_difference = any(re.findall(r"\d+", value) != re.findall(r"\d+", first) for value in signatures[1:])
+    check = {
+        "status": "disagreement" if disagreed else "agreement",
+        "needs_review": disagreed or "[?]" in chosen or blank,
+        "reason": "No text was returned; confirm this page is blank." if blank else reason,
+        "number_difference": number_difference,
+        "selected_reading": selected + 1,
+        "passes": len(readings),
+        "differences": reading_differences(readings[0], readings[1]) if disagreed else [],
+        "readings": [{"label": f"Reading {i + 1}", "text": renumber_pages(t, page)}
+                     for i, t in enumerate(readings)] if disagreed else [],
+    }
+    return renumber_pages(chosen, page), check
+
+
+def read_page_with_verification(job, raw, page, pool, reuse):
+    settings = job.settings
+
+    def read(pass_number):
+        part = f"{page}-read-{pass_number}"
+        previous = load_checkpoint("ocr_reads", job.key, part) if reuse else None
+        if valid_ocr(previous, 1, 1):
+            return previous
+        with job.lock:
+            job.message = f"Checking page {page}: reading {pass_number} of up to 3…"
+        # Each request is independent: no previous transcription is in its prompt.
+        # The second uses unaltered color and crops to preserve faint annotations.
+        result = ocr_chunk_bulletproof(
+            raw, 1, pool, settings["model"],
+            input_mode=settings["input_mode"] if pass_number == 1 else "images",
+            dpi=settings["dpi"],
+            preprocess=settings["preprocess"] if pass_number == 1 else ("original" if pass_number == 2 else "standard"),
+            detail_views=pass_number > 1, verification=True,
+        )
+        result = clean_bengali_ocr_text(result)
+        if not valid_ocr(result, 1, 1):
+            raise OCRIncompleteError("The verification response has invalid page markers.")
+        if not save_checkpoint("ocr_reads", job.key, part, result):
+            job.note("The server could not save verification progress. Keep this tab open and download the finished backup.")
+        return result
+
+    readings = [read(1), read(2)]
+    if reading_signature(readings[0]) != reading_signature(readings[1]):
+        readings.append(read(3))
+    return compare_page_readings(readings, page)
+
+
 def run_ocr_job(job, pdf_data, reuse, keys):
     settings = job.settings
     total_pages = pdf_metadata(pdf_data)["pages"]
-    size = settings["chunk_size"]
+    accuracy = bool(settings.get("accuracy_strategy"))
+    size = 1 if accuracy else settings["chunk_size"]
     ranges = [(start, min(start + size - 1, total_pages)) for start in range(1, total_pages + 1, size)]
     results = {}
     with job.lock:
@@ -3808,8 +3980,11 @@ def run_ocr_job(job, pdf_data, reuse, keys):
         job.message = "Checking saved progress and embedded text…"
     for start, end in ranges:
         saved = load_checkpoint("ocr", job.key, f"{start}-{end}") if reuse else None
-        if valid_ocr(saved, start, end):
-            results[start] = saved
+        saved_text = saved.get("text") if isinstance(saved, dict) else saved
+        checks = saved.get("page_checks", {}) if isinstance(saved, dict) else {}
+        if valid_ocr(saved_text, start, end) and (not accuracy or str(start) in checks):
+            results[start] = saved_text
+            job.page_checks.update(checks)
             job.done += end - start + 1
             job.restored += end - start + 1
     # Avoid re-scanning text layers when every page is already checkpointed.
@@ -3820,10 +3995,12 @@ def run_ocr_job(job, pdf_data, reuse, keys):
 
     def worker(item):
         start, end = item
-        pieces, page = [], start
+        pieces, page, checks = [], start, {}
         while page <= end:
             if page - 1 in local_pages:
                 pieces.append(f"=== PAGE {page} ===\n" + clean_bengali_ocr_text(local_pages[page - 1]))
+                checks[str(page)] = {"status": "digital_text", "needs_review": False,
+                                     "reason": "Extracted from embedded PDF text; no AI verification was performed."}
                 with job.lock:
                     job.local += 1
                 page += 1
@@ -3834,16 +4011,21 @@ def run_ocr_job(job, pdf_data, reuse, keys):
             while last < end and last not in local_pages:
                 last += 1
             raw = page_pdf(pdf_data, page, last)
-            text = ocr_chunk_bulletproof(raw, last - page + 1, pool, settings["model"],
-                                        input_mode=settings["input_mode"], dpi=settings["dpi"], preprocess=settings["preprocess"])
-            pieces.append(renumber_pages(clean_bengali_ocr_text(text), page))
+            if accuracy:
+                text, check = read_page_with_verification(job, raw, page, pool, reuse)
+                checks[str(page)] = check
+                pieces.append(text)
+            else:
+                text = ocr_chunk_bulletproof(raw, last - page + 1, pool, settings["model"],
+                                            input_mode=settings["input_mode"], dpi=settings["dpi"], preprocess=settings["preprocess"])
+                pieces.append(renumber_pages(clean_bengali_ocr_text(text), page))
             page = last + 1
         text = "\n\n".join(pieces)
         if not valid_ocr(text, start, end):
             raise OCRIncompleteError("The page sequence is incomplete or duplicated. Resume to retry.")
         # Preserve the existing isolated-page cross-check. Report differences;
         # never claim the second probabilistic reading proves correctness.
-        if settings["cross_check"] and pool:
+        if settings["cross_check"] and pool and not accuracy:
             for issue in page_boundary_item_report(text):
                 flagged = issue["page"]
                 try:
@@ -3852,18 +4034,27 @@ def run_ocr_job(job, pdf_data, reuse, keys):
                     solo = renumber_pages(clean_bengali_ocr_text(solo), flagged)
                     old, new = page_item_numbers(text, flagged), page_item_numbers(solo, flagged)
                     if old and new and old != new:
-                        text = replace_page_text(text, flagged, solo)
-                        job.note(f"Page {flagged}: isolated reading changed item numbers from {old} to {new}. Verify against the PDF.")
+                        original = page_blocks(text)[flagged]
+                        checks[str(flagged)] = {"status": "disagreement", "needs_review": True,
+                            "reason": "Item numbers differ on a second reading. The first text is kept for review.",
+                            "number_difference": True, "passes": 2, "selected_reading": 1,
+                            "differences": reading_differences(original, solo),
+                            "readings": [{"label": "Reading 1", "text": original}, {"label": "Reading 2", "text": solo}]}
+                        job.note(f"Page {flagged}: readings disagree on item numbers ({old} / {new}). Check the original PDF.")
                 except Exception as error:
+                    checks[str(flagged)] = {"status": "check_failed", "needs_review": True,
+                                           "reason": "The second reading could not finish. Review this page manually."}
                     job.note(f"Page {flagged}: the second reading could not finish; review this page manually. " + safe_error(error, keys))
-        return text
+        return {"text": text, "page_checks": checks}
 
-    def accept(item, text):
+    def accept(item, result):
         start, end = item
+        text = result["text"]
         results[start] = text
-        if not save_checkpoint("ocr", job.key, f"{start}-{end}", text):
+        if not save_checkpoint("ocr", job.key, f"{start}-{end}", result):
             job.note("Automatic saving is unavailable on this server. Download your text or backup before leaving.")
         with job.lock:
+            job.page_checks.update(result["page_checks"])
             job.done += end - start + 1
             job.message = f"{job.done} of {total_pages} pages read"
             job.partial = "\n\n".join(results[n] for n in sorted(results))
@@ -3878,7 +4069,8 @@ def run_ocr_job(job, pdf_data, reuse, keys):
         return
     if not valid_ocr(combined, 1, total_pages):
         raise OCRIncompleteError("Document page order failed its final check.")
-    entry = make_entry("ocr", job.key, job.source_digest, settings, combined, pages=total_pages, notes=job.notes)
+    entry = make_entry("ocr", job.key, job.source_digest, settings, combined, pages=total_pages,
+                       notes=job.notes, page_checks=job.page_checks)
     if not save_entry(entry):
         job.note("The server could not save the finished result. Download a backup below.")
     with job.lock:
@@ -3983,52 +4175,54 @@ def parse_backup(data):
 # ============================================================
 APP_CSS = """
 <style>
-:root { --ec-red:#8d2433; --ec-ink:#282d36; --ec-muted:#626b76; --ec-border:#e6e2dd; }
-[data-testid="stAppViewContainer"] { background:#f7f6f3; color:var(--ec-ink); }
-[data-testid="stHeader"] { background:rgba(247,246,243,.95); }
-[data-testid="stSidebar"] { background:#f0eeea; border-right:1px solid var(--ec-border); }
-.block-container { max-width:1220px; padding-top:2.7rem; padding-bottom:3rem; }
-h1,h2,h3 { color:var(--ec-ink); letter-spacing:-.035em; }
-h1 { font-size:2.5rem !important; line-height:1.14 !important; }
+/* Native widgets keep Streamlit's matched foreground/background theme.
+   Never paint a light surface beneath a dark theme's white labels. */
+:root { --ec-red:#8d2433; --ec-border:rgba(128,128,128,.35); }
+.block-container { max-width:1220px; padding-top:4.25rem; padding-bottom:3rem; }
+h1,h2,h3 { letter-spacing:-.025em; }
+h1 { font-size:2.2rem !important; line-height:1.2 !important; }
 h2 { font-size:1.6rem !important; }
 h3 { font-size:1.12rem !important; }
-.ec-eyebrow { color:var(--ec-red); font-weight:750; font-size:.72rem; letter-spacing:.16em; margin-bottom:12px; }
-.ec-subtitle { color:var(--ec-muted); font-size:1.03rem; max-width:680px; line-height:1.65; }
-.ec-header { padding:16px 0 22px; border-bottom:1px solid var(--ec-border); margin-bottom:20px; }
+.ec-eyebrow { color:inherit; font-weight:750; font-size:.75rem; letter-spacing:.12em; margin-bottom:12px; }
+.ec-subtitle { color:inherit; font-size:1.03rem; max-width:700px; line-height:1.65; }
+.ec-header { padding:12px 0 22px; border-bottom:1px solid var(--ec-border); margin-bottom:20px; }
 .ec-topline { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-.ec-pill { background:#e9f1ec; color:#266344; border:1px solid #cfdfd4; padding:6px 10px; border-radius:20px; font-size:.73rem; white-space:nowrap; }
-.ec-pill.off { background:#f1eee7; color:#736249; border-color:#e3dacc; }
+.ec-pill { color:inherit; border:1px solid var(--ec-border); padding:6px 10px; border-radius:20px; font-size:.78rem; white-space:nowrap; }
 .ec-steps { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin:8px 0 26px; }
-.ec-step { padding:15px 17px; border-radius:12px; border:1px solid var(--ec-border); background:#fff; }
-.ec-step.active { border-color:#8d2433; box-shadow:inset 0 3px #8d2433; }
-.ec-step.complete { border-color:#bfd4c5; }
-.ec-step small { display:block; color:var(--ec-muted); font-size:.78rem; margin-top:5px; }
-.ec-step b { font-size:.88rem; }
-.ec-step span { color:var(--ec-red); margin-right:9px; font-size:.78rem; }
+.ec-step { color:inherit; padding:15px 17px; border-radius:12px; border:1px solid var(--ec-border); }
+.ec-step.active { border-color:#b84b60; box-shadow:inset 0 3px #b84b60; }
+.ec-step.complete { border-color:#588d6e; }
+.ec-step small { display:block; color:inherit; font-size:.82rem; margin-top:5px; }
+.ec-step b { font-size:.9rem; }
+.ec-step span { color:inherit; margin-right:9px; font-size:.82rem; }
 .ec-section { display:flex; gap:10px; align-items:center; margin:25px 0 8px; }
-.ec-number { color:var(--ec-red); background:#f1e4e5; width:32px; height:32px; border-radius:9px; display:grid; place-items:center; font-weight:700; }
+.ec-number { color:inherit; border:1px solid var(--ec-border); width:32px; height:32px; border-radius:9px; display:grid; place-items:center; font-weight:700; }
 .ec-section h2 { padding:0; margin:0; }
-.ec-file { background:white; border:1px solid var(--ec-border); padding:14px 17px; border-radius:10px; margin:4px 0 14px; }
-.ec-file small { display:block; color:var(--ec-muted); margin-top:5px; }
+.ec-file { color:inherit; border:1px solid var(--ec-border); padding:14px 17px; border-radius:10px; margin:4px 0 14px; }
+.ec-file small { display:block; color:inherit; margin-top:5px; }
 .stButton button, .stDownloadButton button { border-radius:9px; min-height:42px; font-weight:600; }
-.stButton button[kind="primary"], [data-testid="stFormSubmitButton"] button[kind="primary"] { background:#8d2433; border-color:#8d2433; color:white; }
-.stButton button[kind="primary"]:hover { background:#701c29; border-color:#701c29; }
-.stButton button:focus-visible, textarea:focus-visible, input:focus-visible { outline:3px solid #ca9ca5 !important; outline-offset:2px; }
-[data-testid="stMetric"] { background:white; border:1px solid var(--ec-border); border-radius:10px; padding:12px 16px; }
-[data-testid="stMetricValue"] { font-size:1.5rem; color:var(--ec-ink); }
-[data-testid="stExpander"] { background:white; border-radius:10px; }
+.stButton button[kind="primary"]:not(:disabled), [data-testid="stFormSubmitButton"] button[kind="primary"]:not(:disabled) { background:#8d2433; border-color:#8d2433; color:#fff; }
+.stButton button[kind="primary"]:not(:disabled) p, [data-testid="stFormSubmitButton"] button[kind="primary"]:not(:disabled) p { color:#fff; }
+.stButton button[kind="primary"]:not(:disabled):hover { background:#701c29; border-color:#701c29; }
+[data-testid="stExpander"] summary:hover, [data-testid="stExpander"] summary:hover p { color:inherit !important; }
+button[kind="secondary"]:not(:disabled):hover { color:inherit; }
+button:focus-visible, textarea:focus-visible, input:focus-visible { outline:3px solid #b84b60 !important; outline-offset:2px; }
+[data-testid="stMetric"] { border:1px solid var(--ec-border); border-radius:10px; padding:12px 16px; }
+[data-testid="stMetricValue"] { font-size:1.5rem; }
 [data-testid="stTextArea"] textarea { line-height:1.8; font-size:.96rem; resize:vertical; }
-[data-testid="stFileUploaderDropzone"] { background:#fff; border:1px dashed #baaaad; border-radius:12px; }
-[data-testid="stCaptionContainer"] { color:var(--ec-muted); }
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p { color:inherit !important; }
+[data-testid="stCaptionContainer"] { opacity:1 !important; }
+[data-testid="stSliderThumbValue"] { color:inherit; }
+[data-testid="stFileUploaderDropzone"] { border:1px dashed #967d82; border-radius:12px; }
 [data-testid="stAlert"] { border-radius:10px; }
 @media (max-width:700px) {
- .block-container { padding:2.4rem 1rem 2rem; }
- h1 { font-size:1.85rem !important; }
+ .block-container { padding:4rem 1rem 2rem; }
+ h1 { font-size:1.8rem !important; }
  .ec-steps { gap:6px; }
  .ec-step { padding:11px 9px; }
- .ec-step small { font-size:.68rem; }
- .ec-step b { font-size:.76rem; }
- .ec-topline { align-items:flex-start; }
+ .ec-step small { font-size:.75rem; }
+ .ec-step b { font-size:.8rem; }
+ .ec-topline { align-items:flex-start; flex-wrap:wrap; }
 }
 </style>
 """
@@ -4068,6 +4262,11 @@ def apply_text_edit(new_text):
     if not valid_ocr(new_text, 1, entry["pages"]):
         st.error("Keep every === PAGE n === marker exactly once, in page order. Your edits have not been applied.")
         return False
+    before, after = page_blocks(entry["payload"]), page_blocks(new_text)
+    for number, check in entry.get("page_checks", {}).items():
+        if before.get(int(number)) != after.get(int(number)) and isinstance(check, dict):
+            check.pop("reviewed_digest", None)
+            check.pop("reviewed_at", None)
     entry["payload"], entry["payload_digest"] = new_text, stable_digest(new_text)
     entry["edited"] = True
     entry["created_at"] = datetime.now(timezone.utc).isoformat()
@@ -4079,6 +4278,25 @@ def apply_text_edit(new_text):
     return True
 
 
+def page_needs_review(block, check):
+    return "[?]" in block or (isinstance(check, dict) and check.get("needs_review", False)
+                              and check.get("reviewed_digest") != stable_digest(block))
+
+
+def mark_page_reviewed(page):
+    entry = copy.deepcopy(st.session_state["ocr_entry"])
+    check = entry.setdefault("page_checks", {}).setdefault(str(page), {})
+    check["reviewed_digest"] = stable_digest(page_blocks(entry["payload"])[page])
+    check["reviewed_at"] = datetime.now(timezone.utc).isoformat()
+    if not save_entry(entry):
+        st.session_state["save_warning"] = "Review status is available in this session. Download a backup to keep it."
+    st.session_state["ocr_entry"] = entry
+    st.session_state.setdefault("imported_cache", {})[cache_relative("ocr", entry["key"])] = entry
+    st.session_state["flash"] = f"Page {page} marked as checked against the PDF."
+    if "[?]" in page_blocks(entry["payload"])[page]:
+        st.session_state["flash"] += " Remaining [?] markers stay on the review list."
+
+
 def render_sidebar(busy):
     with st.sidebar:
         st.markdown("**BUET E-COUNCIL**")
@@ -4087,19 +4305,23 @@ def render_sidebar(busy):
         kind = st.radio("Document type", ["Modern printed document", "Old, faded or handwritten document"], disabled=busy)
         old = kind.startswith("Old")
         st.caption("One page per request helps keep difficult names and numbers in context." if old else "Digital text is read locally when suitable. Scans are read by Gemini.")
+        accuracy = st.radio("Reading mode", ["Accuracy first (recommended)", "Faster reading"], disabled=busy).startswith("Accuracy")
+        if accuracy:
+            st.caption("Scans are checked twice, with a third reading on disagreement. Slower; uses 2–3 AI requests per page, plus any retries. Conflicting details stay visible for review.")
         reuse = st.checkbox("Reuse saved results", value=True, disabled=busy,
                             help="Return saved results for the same document and settings. Turn off for a fresh run; this may use Gemini credits.")
         with st.expander("Advanced settings", expanded=False):
             model = st.text_input("Gemini model", value=MODEL_NAME, disabled=busy).strip()
             mode = st.radio("OCR processing method", ["High-DPI page images (recommended)", "Raw PDF chunks"], disabled=busy)
             dpi = st.slider("Image quality (DPI)", 200, 400, OCR_IMAGE_DPI, 50, disabled=busy)
-            chunk_size = st.slider("Pages read at a time", 1, 40, 1 if old else 4, key=f"batch_{old}", disabled=busy)
+            chunk_size = st.slider("Pages read at a time", 1, 40, 1 if old or accuracy else 4, key=f"batch_{old}_{accuracy}", disabled=busy or accuracy,
+                                   help="Accuracy first reads one page at a time to reduce omissions and name mixing.")
             layer = st.checkbox("Use embedded PDF text when available", True, disabled=busy)
             strong = st.checkbox("Stronger contrast for badly faded scans", False, disabled=busy,
                                    help="Try this only if gentle cleanup leaves text unreadable. Strong contrast can remove faint strokes.")
-            care = st.selectbox("Reading care", ["Quick transcription", "More reasoning"], index=1 if old else 0, key=f"care_{old}", disabled=busy,
+            care = st.selectbox("Reading care", ["Quick transcription", "More reasoning"], index=1 if old or accuracy else 0, key=f"care_{old}_{accuracy}", disabled=busy,
                                 help="More reasoning may help difficult pages and can take longer. Always review uncertain names and numbers.")
-            cross_check = st.checkbox("Cross-check suspicious page boundaries", True, disabled=busy,
+            cross_check = st.checkbox("Cross-check suspicious page boundaries", True, disabled=busy or accuracy,
                                      help="Retains isolated re-reading for pages that may have lost an item number. May make extra Gemini requests.")
             chars = st.slider("Text size per request", 30_000, 100_000, JSON_CHUNK_CHARS, 10_000, disabled=busy)
             workers = st.slider("Parallel requests", 1, 24, DEFAULT_MAX_WORKERS, disabled=busy,
@@ -4118,7 +4340,8 @@ def render_sidebar(busy):
                     for entry in imported.values():
                         if entry["stage"] == "ocr":
                             cfg = entry["settings"]
-                            st.caption(f"Saved settings: {cfg['model']}; {cfg['chunk_size']} page(s) per request; {cfg['dpi']} DPI; {cfg['preprocess']} cleanup.")
+                            saved_mode = "Accuracy first" if cfg.get("accuracy_strategy") else "Faster reading"
+                            st.caption(f"Saved settings: {saved_mode}; {cfg['model']}; {cfg['chunk_size']} page(s) per request; {cfg['dpi']} DPI; {cfg['preprocess']} cleanup.")
                 except (OSError, ValueError, zipfile.BadZipFile, RuntimeError) as error:
                     st.error(safe_error(error))
         st.caption("Progress is saved on this server. Download a backup to keep results through cloud redeployments.")
@@ -4126,11 +4349,21 @@ def render_sidebar(busy):
     ocr = dict(base, input_mode="images" if mode.startswith("High") else "pdf", dpi=dpi, chunk_size=chunk_size,
                use_text_layer=layer, preprocess="strong" if strong else ("degraded" if old else "standard"),
                thinking="low" if care == "More reasoning" else "minimal", cross_check=cross_check)
+    if accuracy:
+        ocr.update(accuracy_strategy=ACCURACY_STRATEGY, chunk_size=1)
     js = dict(base, chunk_chars=chars)
     return reuse, ocr, js
 
 
-@st.fragment(run_every=1.0)
+# Older installations can still run the app without upgrading dependencies.
+_fragment = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
+
+
+def progress_fragment(function):
+    return _fragment(run_every=1.0)(function) if _fragment else function
+
+
+@progress_fragment
 def render_progress():
     job = get_active_job()
     if job is None:
@@ -4145,6 +4378,8 @@ def render_progress():
             st.info("Pausing after active batches finish. Completed work will be kept.")
         elif st.button("Pause after current batches", key="pause_job"):
             job.pause.set()
+            st.rerun()
+        if _fragment is None and st.button("Refresh progress", key="refresh_progress"):
             st.rerun()
         return
     if snap["status"] == "complete":
@@ -4164,6 +4399,8 @@ def render_progress():
 
 def legacy_ocr_entry(data, settings, page_count):
     """Recognize the previous version's default cache without masking setting changes."""
+    if settings.get("accuracy_strategy"):
+        return None  # An earlier single reading is not a verified extraction.
     expected = {"model": MODEL_NAME, "input_mode": "images", "dpi": OCR_IMAGE_DPI, "chunk_size": 4,
                 "preprocess": "standard", "use_text_layer": True, "thinking": "minimal", "cross_check": True}
     if any(settings[k] != v for k, v in expected.items()):
@@ -4201,13 +4438,21 @@ def render_ocr_review(pdf_data, busy):
     text = entry["payload"]
     blocks = page_blocks(text)
     uncertain = [n for n, value in blocks.items() if "[?]" in value]
+    checks = entry.get("page_checks", {})
+    flagged = [n for n, value in blocks.items() if page_needs_review(value, checks.get(str(n), {}))]
     cols = st.columns(3)
     cols[0].metric("Pages read", entry["pages"])
     cols[1].metric("Characters", f"{len(text):,}")
-    cols[2].metric("Unclear readings", text.count("[?]"))
+    cols[2].metric("Pages to review", len(flagged))
     st.caption(f"{st.session_state.get('ocr_origin', 'Saved result')} · {'Edited transcription' if entry.get('edited') else 'Ready to review'}")
     if uncertain:
         st.warning("Review [?] on page(s): " + ", ".join(map(str, uncertain)) + ". The app kept uncertainty visible instead of filling it in.")
+    disagreements = [n for n in flagged if checks.get(str(n), {}).get("status") == "disagreement"]
+    if disagreements:
+        st.warning("Independent readings disagree on page(s): " + ", ".join(map(str, disagreements)) + ". Check names, numbers and missing text against the original.")
+    if entry["settings"].get("accuracy_strategy"):
+        agreed = sum(c.get("status") == "agreement" for c in checks.values() if isinstance(c, dict))
+        st.caption(f"{agreed} page(s) have matching AI readings. Agreement is a review aid, not an accuracy percentage. Embedded digital text is extracted directly.")
     issues = ocr_consistency_report(text) + [i["message"] for i in page_boundary_item_report(text)]
     if issues or entry.get("notes"):
         with st.expander(f"Review notes ({len(issues) + len(entry.get('notes', []))})"):
@@ -4216,16 +4461,20 @@ def render_ocr_review(pdf_data, busy):
     with st.expander("Review and edit extracted text", expanded=True):
         view = st.radio("Review mode", ["Page by page", "Complete text"], horizontal=True, disabled=busy)
         if view == "Page by page":
-            only_flagged = st.checkbox("Show only pages with [?]", False, disabled=busy or not uncertain)
-            options = uncertain if only_flagged and uncertain else list(blocks)
-            page = st.selectbox("Page", options, format_func=lambda n: f"Page {n}" + (" · needs review" if n in uncertain else ""), disabled=busy)
+            only_flagged = st.checkbox("Show only pages needing review", False, disabled=busy or not flagged)
+            options = flagged if only_flagged and flagged else list(blocks)
+            page = st.selectbox("Page", options, format_func=lambda n: f"Page {n}" + (" · needs review" if n in flagged else ""), disabled=busy)
             left, right = st.columns([1, 1])
             with left:
                 st.caption("Original document")
                 if pdf_data:
                     try:
                         with scroll_box(440, border=False):
-                            st.image(pdf_preview(pdf_data, page), use_container_width=True)
+                            preview = pdf_preview(pdf_data, page)
+                            try:
+                                st.image(preview, use_container_width=True)
+                            except TypeError:  # Streamlit releases before use_container_width
+                                st.image(preview, use_column_width=True)
                     except Exception:
                         st.info("Page preview is unavailable; check the original PDF.")
             with right:
@@ -4236,6 +4485,26 @@ def render_ocr_review(pdf_data, busy):
                         updated = replace_page_text(text, page, edited)
                         if apply_text_edit(updated):
                             st.rerun()
+            check = checks.get(str(page), {})
+            if check:
+                st.caption(check.get("reason", ""))
+            if check.get("readings"):
+                with st.expander("Compare independent readings", expanded=page in flagged):
+                    if check.get("number_difference"):
+                        st.warning("Numbers differ between readings. Verify every affected date and number in the PDF.")
+                    if check.get("differences"):
+                        st.table(check["differences"])
+                        st.caption("Up to 12 differences between readings 1 and 2 are shown. Full readings are below.")
+                    for i, reading in enumerate(check["readings"], 1):
+                        st.text_area(reading["label"], value=reading["text"], height=180, disabled=True,
+                                     key=f"alternative_{entry['key']}_{page}_{i}")
+                        if st.button(f"Use reading {i} for page {page}", key=f"use_reading_{page}_{i}", disabled=busy):
+                            if apply_text_edit(replace_page_text(text, page, reading["text"])):
+                                st.rerun()
+            if check and page in flagged:
+                if st.button("I checked this page against the PDF", key=f"confirm_page_{page}", disabled=busy):
+                    mark_page_reviewed(page)
+                    st.rerun()
         else:
             with st.form("full_text_edit"):
                 edited = st.text_area("Combined OCR output", value=text, height=440, disabled=busy)
@@ -4246,6 +4515,9 @@ def render_ocr_review(pdf_data, busy):
     base = st.session_state.get("ocr_filename", "meeting")
     a.download_button("Download text (.txt)", text, file_name=f"{base}_ocr.txt", mime="text/plain", use_container_width=True)
     b.download_button("Download Markdown (.md)", text, file_name=f"{base}_ocr.md", mime="text/markdown", use_container_width=True)
+    if checks:
+        st.download_button("Download reading checks (.json)", json.dumps(checks, ensure_ascii=False, indent=2),
+                           file_name=f"{base}_reading_checks.json", mime="application/json")
 
 
 def render_record():
