@@ -3791,7 +3791,7 @@ def pdf_viewer_html(preview, page_number):
     image_data = base64.b64encode(preview).decode("ascii")
     return '''<!doctype html><html lang="en"><head><meta charset="utf-8">
 <style>
-*{box-sizing:border-box}html,body{margin:0;height:100%;font:14px system-ui,sans-serif;color:#302924;background:#faf8f5}
+*{box-sizing:border-box}html,body{margin:0;height:100%;font:16px system-ui,sans-serif;color:#302924;background:#faf8f5}
 body{display:flex;flex-direction:column;border:1px solid #d8cdc3;border-radius:10px;overflow:hidden}
 .toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:9px;background:#f0ebe4;border-bottom:1px solid #d8cdc3}
 button{border:1px solid #bca99b;border-radius:6px;background:white;color:#58352e;min-width:34px;min-height:34px;padding:4px 9px;font:inherit;cursor:pointer}
@@ -3799,7 +3799,7 @@ button:hover{background:#eee2d8}button:focus-visible,input:focus-visible,.viewpo
 button:disabled{opacity:.45;cursor:default}input{accent-color:#7b3f35;width:90px;min-width:50px;flex:1;max-width:145px}
 output{min-width:43px;font-variant-numeric:tabular-nums}.viewport{flex:1;min-height:0;overflow:auto;background:#e9e3dc;padding:12px;overscroll-behavior:contain}
 img{display:block;max-width:none;height:auto;background:#fff;box-shadow:0 1px 5px #0002;cursor:grab;user-select:none;-webkit-user-drag:none}
-.viewport.dragging img{cursor:grabbing}.hint{font-size:12px;padding:5px 10px;background:#f0ebe4;color:#594b42}
+.viewport.dragging img{cursor:grabbing}.hint{font-size:14px;padding:5px 10px;background:#f0ebe4;color:#594b42}
 </style></head><body>
 <div class="toolbar" role="toolbar" aria-label="Original PDF zoom controls">
 <button id="out" aria-label="Zoom out" title="Zoom out">−</button>
@@ -4240,28 +4240,33 @@ APP_CSS = """
 /* The bundled .streamlit/config.toml supplies the warm white theme to ALL
    native widgets. Keep their foreground/background pairs together. */
 :root { --ec-red:#7b3f35; --ec-border:#d8cdc3; }
+/* Slightly larger type, including native controls, without changing colors. */
+html { font-size:17px; }
+[data-testid="stWidgetLabel"] p, [data-testid="stButton"] p,
+[data-testid="stDownloadButton"] p, [data-testid="stFormSubmitButton"] p,
+[data-testid="stRadio"] label p, [data-testid="stCheckbox"] label p { font-size:1rem; }
 .block-container { max-width:1220px; padding-top:4.25rem; padding-bottom:3rem; }
 h1,h2,h3 { letter-spacing:-.025em; }
 h1 { font-size:2.2rem !important; line-height:1.2 !important; }
 h2 { font-size:1.6rem !important; }
 h3 { font-size:1.12rem !important; }
-.ec-eyebrow { color:inherit; font-weight:750; font-size:.75rem; letter-spacing:.12em; margin-bottom:12px; }
+.ec-eyebrow { color:inherit; font-weight:750; font-size:.85rem; letter-spacing:.12em; margin-bottom:12px; }
 .ec-subtitle { color:inherit; font-size:1.03rem; max-width:700px; line-height:1.65; }
 .ec-header { padding:12px 0 22px; border-bottom:1px solid var(--ec-border); margin-bottom:20px; }
 .ec-topline { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-.ec-pill { color:#624938; background:#f0ebe4; border:1px solid var(--ec-border); padding:6px 10px; border-radius:20px; font-size:.78rem; white-space:nowrap; }
+.ec-pill { color:#624938; background:#f0ebe4; border:1px solid var(--ec-border); padding:6px 10px; border-radius:20px; font-size:.88rem; white-space:nowrap; }
 .ec-steps { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin:8px 0 26px; }
 .ec-step { color:#302924; background:#fff; padding:15px 17px; border-radius:12px; border:1px solid var(--ec-border); }
 .ec-step.active { border-color:#8c5447; box-shadow:inset 0 3px #8c5447; }
 .ec-step.complete { border-color:#a38b71; }
-.ec-step small { display:block; color:inherit; font-size:.82rem; margin-top:5px; }
-.ec-step b { font-size:.9rem; }
-.ec-step span { color:inherit; margin-right:9px; font-size:.82rem; }
+.ec-step small { display:block; color:inherit; font-size:.94rem; margin-top:5px; }
+.ec-step b { font-size:1rem; }
+.ec-step span { color:inherit; margin-right:9px; font-size:.94rem; }
 .ec-section { display:flex; gap:10px; align-items:center; margin:25px 0 8px; }
 .ec-number { color:#7b3f35; background:#eee2d8; border:1px solid var(--ec-border); width:32px; height:32px; border-radius:9px; display:grid; place-items:center; font-weight:700; }
 .ec-section h2 { padding:0; margin:0; }
 .ec-file { color:#302924; background:#fff; border:1px solid var(--ec-border); padding:14px 17px; border-radius:10px; margin:4px 0 14px; }
-.ec-file small { display:block; color:inherit; margin-top:5px; }
+.ec-file small { display:block; color:inherit; margin-top:5px; font-size:.94rem; }
 .stButton button, .stDownloadButton button { border-radius:9px; min-height:42px; font-weight:600; }
 .stButton button[kind="primary"]:not(:disabled), [data-testid="stFormSubmitButton"] button[kind="primary"]:not(:disabled) { background:#7b3f35; border-color:#7b3f35; color:#fff; }
 .stButton button[kind="primary"]:not(:disabled) p, [data-testid="stFormSubmitButton"] button[kind="primary"]:not(:disabled) p { color:#fff; }
@@ -4271,8 +4276,8 @@ button[kind="secondary"]:not(:disabled):hover { color:inherit; }
 button:focus-visible, textarea:focus-visible, input:focus-visible { outline:3px solid #8c5447 !important; outline-offset:2px; }
 [data-testid="stMetric"] { border:1px solid var(--ec-border); border-radius:10px; padding:12px 16px; }
 [data-testid="stMetricValue"] { font-size:1.5rem; }
-[data-testid="stTextArea"] textarea { line-height:1.8; font-size:.96rem; resize:vertical; }
-[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p { color:inherit !important; }
+[data-testid="stTextArea"] textarea { line-height:1.8; font-size:1.06rem; resize:vertical; }
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p { color:inherit !important; font-size:.94rem; }
 [data-testid="stCaptionContainer"] { opacity:1 !important; }
 [data-testid="stSliderThumbValue"] { color:inherit; }
 [data-testid="stFileUploaderDropzone"] { border:1px dashed #967d82; border-radius:12px; }
@@ -4282,8 +4287,8 @@ button:focus-visible, textarea:focus-visible, input:focus-visible { outline:3px 
  h1 { font-size:1.8rem !important; }
  .ec-steps { gap:6px; }
  .ec-step { padding:11px 9px; }
- .ec-step small { font-size:.75rem; }
- .ec-step b { font-size:.8rem; }
+ .ec-step small { font-size:.88rem; }
+ .ec-step b { font-size:.94rem; }
  .ec-topline { align-items:flex-start; flex-wrap:wrap; }
 }
 </style>
@@ -4367,7 +4372,7 @@ def render_sidebar(busy):
         kind = st.radio("Document type", ["Modern printed document", "Old, faded or handwritten document"], disabled=busy)
         old = kind.startswith("Old")
         st.caption("One page per request helps keep difficult names and numbers in context." if old else "Digital text is read locally when suitable. Scans are read by Gemini.")
-        accuracy = st.radio("Reading mode", ["Accuracy first (recommended)", "Faster reading"], disabled=busy).startswith("Accuracy")
+        accuracy = st.radio("Reading mode", ["Accuracy first (recommended)", "Faster reading"], index=1, disabled=busy).startswith("Accuracy")
         if accuracy:
             st.caption("Scans are checked twice, with a third reading on disagreement. Slower; uses 2–3 AI requests per page, plus any retries. Conflicting details stay visible for review.")
         reuse = st.checkbox("Reuse saved results", value=True, disabled=busy,
@@ -4616,7 +4621,7 @@ def render_app():
     reuse, ocr_settings, json_settings = render_sidebar(busy)
     status = "AI service configured" if api_keys else "Saved results & digital text"
     badge_class = "" if api_keys else "off"
-    st.markdown(f'''<div class="ec-header"><div class="ec-topline"><div class="ec-eyebrow">BUET E-COUNCIL / DOCUMENT WORKSPACE</div><span class="ec-pill {badge_class}">{status}</span></div><h1>From minutes to meeting records.</h1><div class="ec-subtitle">Read your document, check the text, and create a structured record.<br>Two steps. Your work stays saved as you go.</div></div>''', unsafe_allow_html=True)
+    st.markdown(f'''<div class="ec-header"><div class="ec-topline"><div class="ec-eyebrow">BUET E-COUNCIL / DOCUMENT WORKSPACE</div><span class="ec-pill {badge_class}">{status}</span></div><h1>BUET E-Council Document Processor</h1><div class="ec-subtitle">Read your document, check the text, and create a structured record.<br>Two steps. Your work stays saved as you go.</div></div>''', unsafe_allow_html=True)
     # Replaced below once the current upload has been reconciled with session state.
     steps = st.empty()
     if st.session_state.get("flash"):
