@@ -207,14 +207,38 @@ PROMPT_EXAMPLE = (
     "\n     ৫। 〃                                          সদস্য"
     "\nis transcribed as exactly this and nothing else:"
     "\n=== PAGE 7 ==="
-    "\n৩। অধ্যাপক ডঃ মোঃ শাখাওয়াৎ হোসেন ফিরোজ সদস্য"
+    "\n৩। অধ্যাপক ডঃ মোঃ শাখাওয়াৎ হোসেন ফিরোজ - সদস্য"
     "\nপ্রধান, রসায়ন বিভাগ"
-    "\n৪। অধ্যাপক ডঃ আবু সিদ্দিক সদস্য"
+    "\n৪। অধ্যাপক ডঃ আবু সিদ্দিক - সদস্য"
     "\nডীন, পুরকৌশল অনুষদ"
-    "\n৫। 〃 সদস্য"
+    "\n৫। 〃 - সদস্য"
     "\nWhat this shows: the rare name is copied letter for letter and not normalized; each entry's "
     "affiliation is read from its own line; the role stays on the same line as the person; the "
-    "ditto mark is transcribed as printed, never expanded; no commentary is added."
+    "ditto mark is transcribed as printed, never expanded; the added ' - ' separates "
+    "the name from its following role; no commentary is added."
+)
+
+
+PROMPT_NAME_POSITION = (
+    "\n\n=== NAME-POSITION SEPARATOR (required output formatting) ==="
+    "\nIn a plain-text attendee/member list, separate each person's name from the "
+    "position, office, department or role that follows it with exactly ' - ' "
+    "(one ASCII hyphen with a space on each side). Use the visible page layout "
+    "to identify the boundary, including when the position starts on the next line. "
+    "For a wrapped entry, place the separator after the name before that line break; "
+    "retain the original line order and keep all following position lines with that person."
+    "\nThis separator is the ONLY permitted editorial punctuation addition. "
+    "Do not change, correct, expand or reorder any name, title, abbreviation, "
+    "department, role, digit or ditto mark. Keep honorifics and titles BEFORE a name "
+    "(such as অধ্যাপক, ডঃ, মোঃ, জনাব, Prof. and Dr.) with the name; do not insert "
+    "a separator inside a name or between these prefixes and the name. "
+    "Insert only at the name-to-position boundary, not between every position field."
+    "\nIf a separator is already printed at that boundary, preserve it and do not "
+    "add another. If name and position occupy separate Markdown table cells, keep "
+    "the table cells as the separation; do not add a hyphen inside either cell. "
+    "Do not add separators to headings, narrative paragraphs, agenda items or "
+    "signature blocks. If the boundary is unclear or no position is visible, "
+    "keep the transcription as read; never guess a person's position or name."
 )
 
 PROMPT_COMPLETENESS = (
@@ -328,7 +352,10 @@ PROMPT_CLOSING = (
     "\n  - no digit was inferred from context, sequence, neighbouring entries or what would look plausible;"
     "\n  - every date had its fields counted separately, with no digit lost against a danda;"
     "\n  - anything unreadable is marked [?] rather than filled in with a plausible guess;"
-    "\n  - nothing has been added that is not on the page."
+    "\n  - plain-text attendee entries use the required name-position separator wherever "
+    "the boundary is clear; names, prefixes and position wording are unchanged;"
+    "\n  - nothing has been added that is not on the page except the explicitly "
+    "requested name-position separator."
 )
 
 
@@ -336,7 +363,8 @@ def build_chunk_prompt(handwritten: bool = True) -> str:
     """Assemble the OCR prompt. Handwriting and typewriter rules are included
     only for old/handwritten documents, where they earn their tokens."""
     parts = [PROMPT_MISSION, *PROMPT_NON_NEGOTIABLE, PROMPT_EXAMPLE,
-             PROMPT_COMPLETENESS, PROMPT_LAYOUT, PROMPT_BENGALI, PROMPT_SIGNATURE]
+             PROMPT_COMPLETENESS, PROMPT_LAYOUT, PROMPT_BENGALI, PROMPT_SIGNATURE,
+             PROMPT_NAME_POSITION]
     if handwritten:
         parts.append(PROMPT_HANDWRITING)
     parts.append(PROMPT_CLOSING)
