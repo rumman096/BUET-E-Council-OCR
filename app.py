@@ -3791,15 +3791,15 @@ def pdf_viewer_html(preview, page_number):
     image_data = base64.b64encode(preview).decode("ascii")
     return '''<!doctype html><html lang="en"><head><meta charset="utf-8">
 <style>
-*{box-sizing:border-box}html,body{margin:0;height:100%;font:16px system-ui,sans-serif;color:#302924;background:#faf8f5}
-body{display:flex;flex-direction:column;border:1px solid #d8cdc3;border-radius:10px;overflow:hidden}
-.toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:9px;background:#f0ebe4;border-bottom:1px solid #d8cdc3}
-button{border:1px solid #bca99b;border-radius:6px;background:white;color:#58352e;min-width:34px;min-height:34px;padding:4px 9px;font:inherit;cursor:pointer}
-button:hover{background:#eee2d8}button:focus-visible,input:focus-visible,.viewport:focus-visible{outline:3px solid #8c5447;outline-offset:-3px}
-button:disabled{opacity:.45;cursor:default}input{accent-color:#7b3f35;width:90px;min-width:50px;flex:1;max-width:145px}
-output{min-width:43px;font-variant-numeric:tabular-nums}.viewport{flex:1;min-height:0;overflow:auto;background:#e9e3dc;padding:12px;overscroll-behavior:contain}
+*{box-sizing:border-box}html,body{margin:0;height:100%;font:16px system-ui,sans-serif;color:#30292b;background:#faf6f7}
+body{display:flex;flex-direction:column;border:1px solid #ead5d8;border-radius:10px;overflow:hidden}
+.toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:9px;background:#fff0f2;border-bottom:1px solid #ead5d8}
+button{border:1px solid #ce8e99;border-radius:6px;background:white;color:#8c1423;min-width:34px;min-height:34px;padding:4px 9px;font:inherit;cursor:pointer}
+button:hover{background:#f8e5e8}button:focus-visible,input:focus-visible,.viewport:focus-visible{outline:3px solid #ad1024;outline-offset:-3px}
+button:disabled{opacity:.45;cursor:default}input{accent-color:#ad1024;width:90px;min-width:50px;flex:1;max-width:145px}
+output{min-width:43px;font-variant-numeric:tabular-nums}.viewport{flex:1;min-height:0;overflow:auto;background:#f0e7e9;padding:12px;overscroll-behavior:contain}
 img{display:block;max-width:none;height:auto;background:#fff;box-shadow:0 1px 5px #0002;cursor:grab;user-select:none;-webkit-user-drag:none}
-.viewport.dragging img{cursor:grabbing}.hint{font-size:14px;padding:5px 10px;background:#f0ebe4;color:#594b42}
+.viewport.dragging img{cursor:grabbing}.hint{font-size:14px;padding:5px 10px;background:#fff0f2;color:#625559}
 </style></head><body>
 <div class="toolbar" role="toolbar" aria-label="Original PDF zoom controls">
 <button id="out" aria-label="Zoom out" title="Zoom out">−</button>
@@ -4021,7 +4021,7 @@ def read_page_with_verification(job, raw, page, pool, reuse):
         if not valid_ocr(result, 1, 1):
             raise OCRIncompleteError("The verification response has invalid page markers.")
         if not save_checkpoint("ocr_reads", job.key, part, result):
-            job.note("The server could not save verification progress. Keep this tab open and download the finished backup.")
+            job.note("The server could not save verification progress. Keep this tab open and download the completed text and reading checks.")
         return result
 
     readings = [read(1), read(2)]
@@ -4114,7 +4114,7 @@ def run_ocr_job(job, pdf_data, reuse, keys):
         text = result["text"]
         results[start] = text
         if not save_checkpoint("ocr", job.key, f"{start}-{end}", result):
-            job.note("Automatic saving is unavailable on this server. Download your text or backup before leaving.")
+            job.note("Automatic saving is unavailable on this server. Download your text before leaving.")
         with job.lock:
             job.page_checks.update(result["page_checks"])
             job.done += end - start + 1
@@ -4134,7 +4134,7 @@ def run_ocr_job(job, pdf_data, reuse, keys):
     entry = make_entry("ocr", job.key, job.source_digest, settings, combined, pages=total_pages,
                        notes=job.notes, page_checks=job.page_checks)
     if not save_entry(entry):
-        job.note("The server could not save the finished result. Download a backup below.")
+        job.note("The server could not save the finished result. Download the extracted text below.")
     with job.lock:
         job.result, job.status = entry, "complete"
         job.message = "Text ready for review"
@@ -4195,7 +4195,7 @@ def run_json_job(job, source, reuse, keys):
     _validated_meeting_partial(copy.deepcopy(final))
     entry = make_entry("json", job.key, job.source_digest, settings, final, stitch_notes=stitch_notes, corrections=corrections, incomplete_source="COULD NOT BE READ — press Continue reading" in source)
     if not save_entry(entry):
-        job.note("The server could not save this record. Download a backup below.")
+        job.note("The server could not save this record. Download the meeting record below.")
     with job.lock:
         job.result, job.status = entry, "complete"
         job.message = "Meeting record ready"
@@ -4237,59 +4237,54 @@ def parse_backup(data):
 # ============================================================
 APP_CSS = """
 <style>
-/* The bundled .streamlit/config.toml supplies the warm white theme to ALL
-   native widgets. Keep their foreground/background pairs together. */
-:root { --ec-red:#7b3f35; --ec-border:#d8cdc3; }
-/* Slightly larger type, including native controls, without changing colors. */
+/* Native controls use the matching light palette in .streamlit/config.toml. */
+:root { --ec-red:#ad1024; --ec-border:#ead5d8; }
 html { font-size:17px; }
+.block-container { max-width:1440px; padding:3rem 2rem; }
+h1,h2,h3 { letter-spacing:-.025em; }
+h2 { font-size:1.65rem !important; }
+h3 { font-size:1.18rem !important; }
 [data-testid="stWidgetLabel"] p, [data-testid="stButton"] p,
 [data-testid="stDownloadButton"] p, [data-testid="stFormSubmitButton"] p,
 [data-testid="stRadio"] label p, [data-testid="stCheckbox"] label p { font-size:1rem; }
-.block-container { max-width:1220px; padding-top:4.25rem; padding-bottom:3rem; }
-h1,h2,h3 { letter-spacing:-.025em; }
-h1 { font-size:2.2rem !important; line-height:1.2 !important; }
-h2 { font-size:1.6rem !important; }
-h3 { font-size:1.12rem !important; }
-.ec-eyebrow { color:inherit; font-weight:750; font-size:.85rem; letter-spacing:.12em; margin-bottom:12px; }
-.ec-subtitle { color:inherit; font-size:1.03rem; max-width:700px; line-height:1.65; }
-.ec-header { padding:12px 0 22px; border-bottom:1px solid var(--ec-border); margin-bottom:20px; }
-.ec-topline { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-.ec-pill { color:#624938; background:#f0ebe4; border:1px solid var(--ec-border); padding:6px 10px; border-radius:20px; font-size:.88rem; white-space:nowrap; }
-.ec-steps { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin:8px 0 26px; }
-.ec-step { color:#302924; background:#fff; padding:15px 17px; border-radius:12px; border:1px solid var(--ec-border); }
-.ec-step.active { border-color:#8c5447; box-shadow:inset 0 3px #8c5447; }
-.ec-step.complete { border-color:#a38b71; }
-.ec-step small { display:block; color:inherit; font-size:.94rem; margin-top:5px; }
-.ec-step b { font-size:1rem; }
-.ec-step span { color:inherit; margin-right:9px; font-size:.94rem; }
-.ec-section { display:flex; gap:10px; align-items:center; margin:25px 0 8px; }
-.ec-number { color:#7b3f35; background:#eee2d8; border:1px solid var(--ec-border); width:32px; height:32px; border-radius:9px; display:grid; place-items:center; font-weight:700; }
+.ec-header { display:flex; align-items:center; justify-content:space-between; gap:18px; background:#fff; color:#30292b; border:1px solid var(--ec-border); border-top:4px solid var(--ec-red); border-radius:0 0 15px 15px; padding:20px; box-shadow:0 6px 20px #65101d08; margin-bottom:20px; }
+.ec-brand { display:flex; align-items:center; gap:15px; min-width:0; }
+.ec-logo { display:grid; place-items:center; flex-shrink:0; width:54px; height:54px; background:var(--ec-red); color:#fff; border-radius:12px; font-size:.8rem; font-weight:800; box-shadow:0 4px 12px #ad102426; }
+.ec-header h1 { font-size:1.6rem !important; line-height:1.25 !important; color:#a30d20; padding:0; margin:0; }
+.ec-brand-subtitle { color:#625559; font-size:.95rem; margin-top:4px; }
+.ec-pill { display:flex; align-items:center; gap:8px; color:#8c1423; background:#fff5f6; border:1px solid #ebc4ca; padding:8px 12px; border-radius:24px; font-size:.88rem; font-weight:650; white-space:nowrap; }
+.ec-dot { width:8px; height:8px; border-radius:50%; background:#18845b; box-shadow:0 0 0 3px #18845b15; }
+.ec-pill.off .ec-dot { background:#996b18; box-shadow:none; }
+.ec-intro { color:#45383b; background:#fff; border:1px solid var(--ec-border); border-left:5px solid var(--ec-red); border-radius:12px; padding:17px 20px; margin-bottom:30px; line-height:1.7; box-shadow:0 5px 18px #65101d04; }
+.ec-intro strong { color:#8f1424; }
+.ec-section { display:flex; gap:14px; align-items:center; margin:30px 0 8px; }
+.ec-number { color:#fff; background:var(--ec-red); width:42px; height:44px; flex-shrink:0; border-radius:11px; display:grid; place-items:center; font-weight:750; box-shadow:0 5px 12px #ad102420; }
 .ec-section h2 { padding:0; margin:0; }
-.ec-file { color:#302924; background:#fff; border:1px solid var(--ec-border); padding:14px 17px; border-radius:10px; margin:4px 0 14px; }
-.ec-file small { display:block; color:inherit; margin-top:5px; font-size:.94rem; }
-.stButton button, .stDownloadButton button { border-radius:9px; min-height:42px; font-weight:600; }
-.stButton button[kind="primary"]:not(:disabled), [data-testid="stFormSubmitButton"] button[kind="primary"]:not(:disabled) { background:#7b3f35; border-color:#7b3f35; color:#fff; }
+.ec-sidebar-title { color:#a30d20; font-size:1.5rem; font-weight:750; margin-bottom:14px; }
+.ec-file { color:#30292b; background:#fff; border:1px solid var(--ec-border); padding:14px 17px; border-radius:10px; margin:4px 0 14px; }
+.ec-file small { display:block; color:#625559; margin-top:5px; font-size:.94rem; }
+.stButton button, .stDownloadButton button { border-radius:9px; min-height:44px; font-weight:600; }
+.stButton button[kind="primary"]:not(:disabled), [data-testid="stFormSubmitButton"] button[kind="primary"]:not(:disabled) { background:var(--ec-red); border-color:var(--ec-red); color:#fff; }
 .stButton button[kind="primary"]:not(:disabled) p, [data-testid="stFormSubmitButton"] button[kind="primary"]:not(:disabled) p { color:#fff; }
-.stButton button[kind="primary"]:not(:disabled):hover { background:#603027; border-color:#603027; }
+.stButton button[kind="primary"]:not(:disabled):hover { background:#890d1c; border-color:#890d1c; }
+[data-testid="stExpander"] { border-radius:12px; }
 [data-testid="stExpander"] summary:hover, [data-testid="stExpander"] summary:hover p { color:inherit !important; }
 button[kind="secondary"]:not(:disabled):hover { color:inherit; }
-button:focus-visible, textarea:focus-visible, input:focus-visible { outline:3px solid #8c5447 !important; outline-offset:2px; }
+button:focus-visible, textarea:focus-visible, input:focus-visible { outline:3px solid #ad1024 !important; outline-offset:2px; }
 [data-testid="stMetric"] { border:1px solid var(--ec-border); border-radius:10px; padding:12px 16px; }
 [data-testid="stMetricValue"] { font-size:1.5rem; }
 [data-testid="stTextArea"] textarea { line-height:1.8; font-size:1.06rem; resize:vertical; }
 [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p { color:inherit !important; font-size:.94rem; }
 [data-testid="stCaptionContainer"] { opacity:1 !important; }
 [data-testid="stSliderThumbValue"] { color:inherit; }
-[data-testid="stFileUploaderDropzone"] { border:1px dashed #967d82; border-radius:12px; }
+[data-testid="stFileUploaderDropzone"] { border:2px dashed #ce8e99; border-radius:12px; }
 [data-testid="stAlert"] { border-radius:10px; }
 @media (max-width:700px) {
- .block-container { padding:4rem 1rem 2rem; }
- h1 { font-size:1.8rem !important; }
- .ec-steps { gap:6px; }
- .ec-step { padding:11px 9px; }
- .ec-step small { font-size:.88rem; }
- .ec-step b { font-size:.94rem; }
- .ec-topline { align-items:flex-start; flex-wrap:wrap; }
+ .block-container { padding:3rem 1rem 2rem; }
+ .ec-header { flex-wrap:wrap; padding:16px; }
+ .ec-header h1 { font-size:1.3rem !important; }
+ .ec-intro { padding:14px 16px; }
+ .ec-section h2 { font-size:1.4rem !important; }
 }
 </style>
 """
@@ -4338,7 +4333,7 @@ def apply_text_edit(new_text):
     entry["edited"] = True
     entry["created_at"] = datetime.now(timezone.utc).isoformat()
     if not save_entry(entry):
-        st.session_state["save_warning"] = "Edits are available in this session. Download a backup because the server could not save them."
+        st.session_state["save_warning"] = "Edits are available in this session. Download the edited text because the server could not save it."
     st.session_state.setdefault("imported_cache", {})[cache_relative("ocr", entry["key"])] = entry
     set_ocr_result(entry, st.session_state.get("ocr_filename", "meeting") + ".pdf", "Edited text")
     st.session_state["flash"] = "Edits saved. The next meeting record will use the corrected text."
@@ -4356,7 +4351,7 @@ def mark_page_reviewed(page):
     check["reviewed_digest"] = stable_digest(page_blocks(entry["payload"])[page])
     check["reviewed_at"] = datetime.now(timezone.utc).isoformat()
     if not save_entry(entry):
-        st.session_state["save_warning"] = "Review status is available in this session. Download a backup to keep it."
+        st.session_state["save_warning"] = "Review status is available in this session. Download the reading checks to keep a copy."
     st.session_state["ocr_entry"] = entry
     st.session_state.setdefault("imported_cache", {})[cache_relative("ocr", entry["key"])] = entry
     st.session_state["flash"] = f"Page {page} marked as checked against the PDF."
@@ -4366,10 +4361,10 @@ def mark_page_reviewed(page):
 
 def render_sidebar(busy):
     with st.sidebar:
-        st.markdown("**BUET E-COUNCIL**")
-        st.caption("Document workspace")
+        st.markdown('<div class="ec-sidebar-title">Document options</div>', unsafe_allow_html=True)
+        st.caption("Choose your document type and reading preferences.")
         st.divider()
-        kind = st.radio("Document type", ["Modern printed document", "Old, faded or handwritten document"], disabled=busy)
+        kind = st.radio("What kind of document is this?", ["Modern printed document", "Old, faded or handwritten document"], disabled=busy)
         old = kind.startswith("Old")
         st.caption("One page per request helps keep difficult names and numbers in context." if old else "Digital text is read locally when suitable. Scans are read by Gemini.")
         accuracy = st.radio("Reading mode", ["Accuracy first (recommended)", "Faster reading"], index=1, disabled=busy).startswith("Accuracy")
@@ -4396,7 +4391,7 @@ def render_sidebar(busy):
             rpm = st.number_input("Request limit per minute", 1, 1000, DEFAULT_SAFE_RPM, disabled=busy)
         if not api_keys:
             st.info("Saved results and suitable digital PDFs work now. New AI processing needs an API key in Streamlit Secrets.")
-        st.caption("Progress is saved on this server. Download a backup to keep results through cloud redeployments.")
+        st.caption("Progress is saved on this server. Keep downloaded copies of your text and meeting record; cloud storage can reset.")
     base = {"model": model, "workers": int(workers), "safe_rpm": int(rpm)}
     ocr = dict(base, input_mode="images" if mode.startswith("High") else "pdf", dpi=dpi, chunk_size=chunk_size,
                use_text_layer=layer, preprocess="strong" if strong else ("degraded" if old else "standard"),
@@ -4619,11 +4614,9 @@ def render_app():
     job = get_active_job()
     busy = job is not None  # commit a just-finished job before enabling another one
     reuse, ocr_settings, json_settings = render_sidebar(busy)
-    status = "AI service configured" if api_keys else "Saved results & digital text"
+    status = "OCR service ready" if api_keys else "Local reading available"
     badge_class = "" if api_keys else "off"
-    st.markdown(f'''<div class="ec-header"><div class="ec-topline"><div class="ec-eyebrow">BUET E-COUNCIL / DOCUMENT WORKSPACE</div><span class="ec-pill {badge_class}">{status}</span></div><h1>BUET E-Council Document Processor</h1><div class="ec-subtitle">Read your document, check the text, and create a structured record.<br>Two steps. Your work stays saved as you go.</div></div>''', unsafe_allow_html=True)
-    # Replaced below once the current upload has been reconciled with session state.
-    steps = st.empty()
+    st.markdown(f'''<div class="ec-header"><div class="ec-brand"><div class="ec-logo" aria-hidden="true">BUET</div><div><h1>BUET E-Council Document Processor</h1><div class="ec-brand-subtitle">Academic Council document workspace</div></div></div><span class="ec-pill {badge_class}"><span class="ec-dot" aria-hidden="true"></span>{status}</span></div><div class="ec-intro"><strong>Turn a scanned meeting document into text and a structured record.</strong><br><b>Step 1</b> — upload your PDF and press <b>Read the document</b>, then review the extracted text.<br><b>Step 2</b> — press <b>Create the meeting record</b> to prepare your download.</div>''', unsafe_allow_html=True)
     if st.session_state.get("flash"):
         st.success(st.session_state.pop("flash"))
     if st.session_state.get("save_warning"):
@@ -4641,7 +4634,7 @@ def render_app():
                 st.write(note)
     if job is not None and job.stage == "ocr":
         render_progress()
-    st.markdown('<div class="ec-section"><span class="ec-number">1</span><h2>Read the document</h2></div>', unsafe_allow_html=True)
+    st.markdown('<div class="ec-section"><span class="ec-number">1</span><h2>Extract text from the document</h2></div>', unsafe_allow_html=True)
     st.caption("Upload the PDF you want to process. Previously saved results open without another AI request.")
     uploaded = st.file_uploader("Choose a PDF document", type=["pdf"], key="source_pdf", disabled=busy)
     pdf_data = uploaded.getvalue() if uploaded is not None else None
@@ -4750,15 +4743,7 @@ def render_app():
     if job is not None and job.stage == "json":
         render_progress()  # Keep record progress beside its action and result.
     render_record()
-    entries = [st.session_state.get("ocr_entry"), st.session_state.get("json_entry")]
-    if any(entries):
-        with st.expander("Keep this document ready for your presentation"):
-            st.caption("Download a backup after both steps finish. Put its processed_cache folder beside your app in GitHub to restore saved results. Cloud-generated files are not automatically saved to your repository.")
-            st.download_button("Download document backup (.zip)", make_backup(entries),
-                               file_name=st.session_state.get("ocr_filename", "meeting") + "_backup.zip", mime="application/zip", use_container_width=True)
-    have_text, have_record = bool(st.session_state.get("ocr_entry")), bool(st.session_state.get("json_entry"))
-    states = ["complete" if have_text else "active", "complete" if have_record else ("active" if have_text else ""), "complete" if have_record else ""]
-    steps.markdown('<div class="ec-steps">' + ''.join(f'<div class="ec-step {state}"><b><span>{num}</span>{title}</b><small>{subtitle}</small></div>' for state, num, title, subtitle in zip(states, ["01", "02", "03"], ["Read", "Review", "Export"], ["PDF → extracted text", "Check names & details", "Text, meeting record & backup"])) + '</div>', unsafe_allow_html=True)
+
 
 
 if __name__ == "__main__":
