@@ -17,9 +17,11 @@ import copy
 import tempfile
 import uuid
 import zipfile
+import base64
 from contextlib import contextmanager
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 # Older Streamlit versions require this before accessing secrets or widgets.
 st.set_page_config(
@@ -3726,6 +3728,7 @@ def save_checkpoint(stage, key, part, payload):
 
 def safe_error(error, keys=()):
     message = str(error)
+    message = re.sub(r"\bJSON\b", "meeting record", message, flags=re.IGNORECASE)
     for key in keys:
         if key:
             message = message.replace(key, "[hidden]")
@@ -3770,11 +3773,70 @@ def page_pdf(data, start, end):
         return part.tobytes(garbage=1, deflate=True)
 
 
-def pdf_preview(data, page_number):
-    with PDF_LOCK, fitz.open(stream=data, filetype="pdf") as document:
+@st.cache_data(show_spinner=False, max_entries=6, ttl=600)
+def _cached_pdf_preview(source_digest, page_number, _data):
+    """Keep a few high-resolution previews, keyed by the exact document digest."""
+    with PDF_LOCK, fitz.open(stream=_data, filetype="pdf") as document:
         page = document[page_number - 1]
-        scale = min(1.5, 1200 / max(page.rect.width, page.rect.height))
+        scale = min(4.0, 4096 / max(page.rect.width, page.rect.height))
         return page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False).tobytes("png")
+
+
+def pdf_preview(data, page_number):
+    return _cached_pdf_preview(stable_digest(data), page_number, data)
+
+
+def pdf_viewer_html(preview, page_number):
+    """Local-only zoom/pan controls: changing zoom never reruns the text editor."""
+    image_data = base64.b64encode(preview).decode("ascii")
+    return '''<!doctype html><html lang="en"><head><meta charset="utf-8">
+<style>
+*{box-sizing:border-box}html,body{margin:0;height:100%;font:14px system-ui,sans-serif;color:#302924;background:#faf8f5}
+body{display:flex;flex-direction:column;border:1px solid #d8cdc3;border-radius:10px;overflow:hidden}
+.toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:9px;background:#f0ebe4;border-bottom:1px solid #d8cdc3}
+button{border:1px solid #bca99b;border-radius:6px;background:white;color:#58352e;min-width:34px;min-height:34px;padding:4px 9px;font:inherit;cursor:pointer}
+button:hover{background:#eee2d8}button:focus-visible,input:focus-visible,.viewport:focus-visible{outline:3px solid #8c5447;outline-offset:-3px}
+button:disabled{opacity:.45;cursor:default}input{accent-color:#7b3f35;width:90px;min-width:50px;flex:1;max-width:145px}
+output{min-width:43px;font-variant-numeric:tabular-nums}.viewport{flex:1;min-height:0;overflow:auto;background:#e9e3dc;padding:12px;overscroll-behavior:contain}
+img{display:block;max-width:none;height:auto;background:#fff;box-shadow:0 1px 5px #0002;cursor:grab;user-select:none;-webkit-user-drag:none}
+.viewport.dragging img{cursor:grabbing}.hint{font-size:12px;padding:5px 10px;background:#f0ebe4;color:#594b42}
+</style></head><body>
+<div class="toolbar" role="toolbar" aria-label="Original PDF zoom controls">
+<button id="out" aria-label="Zoom out" title="Zoom out">−</button>
+<button id="fit" title="Fit page width">Fit</button>
+<button id="in" aria-label="Zoom in" title="Zoom in">+</button>
+<input id="zoom" aria-label="Original PDF zoom" type="range" min="50" max="400" step="25" value="100">
+<output id="value" aria-live="polite">100%</output>
+<button id="full" hidden>Full screen</button></div>
+<div class="viewport" id="viewport" tabindex="0" role="region" aria-label="Zoomable original page">
+<img id="page" alt="Original PDF, page ''' + str(int(page_number)) + '''" draggable="false" src="data:image/png;base64,''' + image_data + '''"></div>
+<div class="hint">100% fits the width. Zoom in, then scroll or drag to read small text.</div>
+<script>
+const viewport=document.getElementById('viewport'), picture=document.getElementById('page');
+const slider=document.getElementById('zoom'), output=document.getElementById('value');
+const minus=document.getElementById('out'), plus=document.getElementById('in'), full=document.getElementById('full');
+let zoom=100,drag=null;
+function render(){picture.style.width=Math.max(1,(viewport.clientWidth-24)*zoom/100)+'px';slider.value=zoom;output.textContent=zoom+'%';minus.disabled=zoom<=50;plus.disabled=zoom>=400;}
+function change(value){
+ const oldWidth=picture.clientWidth||1,oldHeight=picture.clientHeight||1;
+ const centerX=(viewport.scrollLeft+viewport.clientWidth/2)/oldWidth;
+ const centerY=(viewport.scrollTop+viewport.clientHeight/2)/oldHeight;
+ zoom=Math.min(400,Math.max(50,Number(value)));render();
+ viewport.scrollLeft=centerX*picture.clientWidth-viewport.clientWidth/2;
+ viewport.scrollTop=centerY*picture.clientHeight-viewport.clientHeight/2;
+}
+plus.onclick=()=>change(zoom+25);minus.onclick=()=>change(zoom-25);
+document.getElementById('fit').onclick=()=>{change(100);viewport.scrollTo(0,0);};
+slider.oninput=()=>change(slider.value);
+viewport.addEventListener('keydown',event=>{if(event.key==='+'||event.key==='='){event.preventDefault();change(zoom+25);}else if(event.key==='-'){event.preventDefault();change(zoom-25);}else if(event.key==='0'){event.preventDefault();change(100);viewport.scrollTo(0,0);}});
+viewport.addEventListener('pointerdown',event=>{if(event.pointerType!=='mouse'||event.button!==0)return;drag={x:event.clientX,y:event.clientY,left:viewport.scrollLeft,top:viewport.scrollTop};viewport.setPointerCapture(event.pointerId);viewport.classList.add('dragging');});
+viewport.addEventListener('pointermove',event=>{if(!drag)return;viewport.scrollLeft=drag.left+drag.x-event.clientX;viewport.scrollTop=drag.top+drag.y-event.clientY;});
+function endDrag(){drag=null;viewport.classList.remove('dragging');}
+viewport.addEventListener('pointerup',endDrag);viewport.addEventListener('pointercancel',endDrag);
+if(document.fullscreenEnabled){full.hidden=false;full.onclick=async()=>{try{if(document.fullscreenElement)await document.exitFullscreen();else await document.documentElement.requestFullscreen();}catch(error){full.hidden=true;}};}
+document.addEventListener('fullscreenchange',()=>{full.textContent=document.fullscreenElement?'Exit full screen':'Full screen';render();});
+new ResizeObserver(render).observe(viewport);picture.onload=render;render();
+</script></body></html>'''
 
 
 class ProcessingJob:
@@ -4145,7 +4207,7 @@ def make_backup(entries):
         for entry in entries:
             if entry and entry_valid(entry, entry.get("stage"), entry.get("key")):
                 archive.writestr("processed_cache/" + cache_relative(entry["stage"], entry["key"]), json.dumps(entry, ensure_ascii=False, indent=2))
-        archive.writestr("README.txt", "Place the processed_cache folder beside your Streamlit Python file and commit it to the repository. Or restore this ZIP in the app. Use the same PDF and processing settings. Cloud runtime files are not automatically committed to GitHub.\n")
+        archive.writestr("README.txt", "Place the processed_cache folder beside your Streamlit Python file and commit it to the repository. Use the same PDF and processing settings. Cloud runtime files are not automatically committed to GitHub.\n")
     return output.getvalue()
 
 
@@ -4175,9 +4237,9 @@ def parse_backup(data):
 # ============================================================
 APP_CSS = """
 <style>
-/* Native widgets keep Streamlit's matched foreground/background theme.
-   Never paint a light surface beneath a dark theme's white labels. */
-:root { --ec-red:#8d2433; --ec-border:rgba(128,128,128,.35); }
+/* The bundled .streamlit/config.toml supplies the warm white theme to ALL
+   native widgets. Keep their foreground/background pairs together. */
+:root { --ec-red:#7b3f35; --ec-border:#d8cdc3; }
 .block-container { max-width:1220px; padding-top:4.25rem; padding-bottom:3rem; }
 h1,h2,h3 { letter-spacing:-.025em; }
 h1 { font-size:2.2rem !important; line-height:1.2 !important; }
@@ -4187,26 +4249,26 @@ h3 { font-size:1.12rem !important; }
 .ec-subtitle { color:inherit; font-size:1.03rem; max-width:700px; line-height:1.65; }
 .ec-header { padding:12px 0 22px; border-bottom:1px solid var(--ec-border); margin-bottom:20px; }
 .ec-topline { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-.ec-pill { color:inherit; border:1px solid var(--ec-border); padding:6px 10px; border-radius:20px; font-size:.78rem; white-space:nowrap; }
+.ec-pill { color:#624938; background:#f0ebe4; border:1px solid var(--ec-border); padding:6px 10px; border-radius:20px; font-size:.78rem; white-space:nowrap; }
 .ec-steps { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin:8px 0 26px; }
-.ec-step { color:inherit; padding:15px 17px; border-radius:12px; border:1px solid var(--ec-border); }
-.ec-step.active { border-color:#b84b60; box-shadow:inset 0 3px #b84b60; }
-.ec-step.complete { border-color:#588d6e; }
+.ec-step { color:#302924; background:#fff; padding:15px 17px; border-radius:12px; border:1px solid var(--ec-border); }
+.ec-step.active { border-color:#8c5447; box-shadow:inset 0 3px #8c5447; }
+.ec-step.complete { border-color:#a38b71; }
 .ec-step small { display:block; color:inherit; font-size:.82rem; margin-top:5px; }
 .ec-step b { font-size:.9rem; }
 .ec-step span { color:inherit; margin-right:9px; font-size:.82rem; }
 .ec-section { display:flex; gap:10px; align-items:center; margin:25px 0 8px; }
-.ec-number { color:inherit; border:1px solid var(--ec-border); width:32px; height:32px; border-radius:9px; display:grid; place-items:center; font-weight:700; }
+.ec-number { color:#7b3f35; background:#eee2d8; border:1px solid var(--ec-border); width:32px; height:32px; border-radius:9px; display:grid; place-items:center; font-weight:700; }
 .ec-section h2 { padding:0; margin:0; }
-.ec-file { color:inherit; border:1px solid var(--ec-border); padding:14px 17px; border-radius:10px; margin:4px 0 14px; }
+.ec-file { color:#302924; background:#fff; border:1px solid var(--ec-border); padding:14px 17px; border-radius:10px; margin:4px 0 14px; }
 .ec-file small { display:block; color:inherit; margin-top:5px; }
 .stButton button, .stDownloadButton button { border-radius:9px; min-height:42px; font-weight:600; }
-.stButton button[kind="primary"]:not(:disabled), [data-testid="stFormSubmitButton"] button[kind="primary"]:not(:disabled) { background:#8d2433; border-color:#8d2433; color:#fff; }
+.stButton button[kind="primary"]:not(:disabled), [data-testid="stFormSubmitButton"] button[kind="primary"]:not(:disabled) { background:#7b3f35; border-color:#7b3f35; color:#fff; }
 .stButton button[kind="primary"]:not(:disabled) p, [data-testid="stFormSubmitButton"] button[kind="primary"]:not(:disabled) p { color:#fff; }
-.stButton button[kind="primary"]:not(:disabled):hover { background:#701c29; border-color:#701c29; }
+.stButton button[kind="primary"]:not(:disabled):hover { background:#603027; border-color:#603027; }
 [data-testid="stExpander"] summary:hover, [data-testid="stExpander"] summary:hover p { color:inherit !important; }
 button[kind="secondary"]:not(:disabled):hover { color:inherit; }
-button:focus-visible, textarea:focus-visible, input:focus-visible { outline:3px solid #b84b60 !important; outline-offset:2px; }
+button:focus-visible, textarea:focus-visible, input:focus-visible { outline:3px solid #8c5447 !important; outline-offset:2px; }
 [data-testid="stMetric"] { border:1px solid var(--ec-border); border-radius:10px; padding:12px 16px; }
 [data-testid="stMetricValue"] { font-size:1.5rem; }
 [data-testid="stTextArea"] textarea { line-height:1.8; font-size:.96rem; resize:vertical; }
@@ -4329,21 +4391,6 @@ def render_sidebar(busy):
             rpm = st.number_input("Request limit per minute", 1, 1000, DEFAULT_SAFE_RPM, disabled=busy)
         if not api_keys:
             st.info("Saved results and suitable digital PDFs work now. New AI processing needs an API key in Streamlit Secrets.")
-        with st.expander("Restore a saved document", expanded=False):
-            st.caption("Upload the backup ZIP downloaded from this app, then use the same PDF and processing settings.")
-            backup = st.file_uploader("Document backup (.zip)", type=["zip"], key="backup_upload", disabled=busy)
-            if backup is not None and st.button("Restore backup", disabled=busy):
-                try:
-                    imported = parse_backup(backup.getvalue())
-                    st.session_state.setdefault("imported_cache", {}).update(imported)
-                    st.success(f"{len(imported)} saved result(s) available in this session.")
-                    for entry in imported.values():
-                        if entry["stage"] == "ocr":
-                            cfg = entry["settings"]
-                            saved_mode = "Accuracy first" if cfg.get("accuracy_strategy") else "Faster reading"
-                            st.caption(f"Saved settings: {saved_mode}; {cfg['model']}; {cfg['chunk_size']} page(s) per request; {cfg['dpi']} DPI; {cfg['preprocess']} cleanup.")
-                except (OSError, ValueError, zipfile.BadZipFile, RuntimeError) as error:
-                    st.error(safe_error(error))
         st.caption("Progress is saved on this server. Download a backup to keep results through cloud redeployments.")
     base = {"model": model, "workers": int(workers), "safe_rpm": int(rpm)}
     ocr = dict(base, input_mode="images" if mode.startswith("High") else "pdf", dpi=dpi, chunk_size=chunk_size,
@@ -4373,7 +4420,10 @@ def render_progress():
     unit = "pages" if snap["stage"] == "ocr" else "sections"
     if snap["status"] == "running":
         st.progress(min(1., snap["done"] / max(1, snap["total"])), text=snap["message"])
-        st.caption(f"{snap['done']} / {snap['total'] or '…'} {unit} · {int(elapsed)//60}m {int(elapsed)%60:02d}s elapsed · {snap['restored']} restored · {snap['local']} read locally")
+        details = f"{snap['done']} / {snap['total'] or '…'} {unit} · {int(elapsed)//60}m {int(elapsed)%60:02d}s elapsed · {snap['restored']} restored"
+        if snap["stage"] == "ocr":
+            details += f" · {snap['local']} read locally"
+        st.caption(details)
         if job.pause.is_set():
             st.info("Pausing after active batches finish. Completed work will be kept.")
         elif st.button("Pause after current batches", key="pause_job"):
@@ -4469,18 +4519,14 @@ def render_ocr_review(pdf_data, busy):
                 st.caption("Original document")
                 if pdf_data:
                     try:
-                        with scroll_box(440, border=False):
-                            preview = pdf_preview(pdf_data, page)
-                            try:
-                                st.image(preview, use_container_width=True)
-                            except TypeError:  # Streamlit releases before use_container_width
-                                st.image(preview, use_column_width=True)
+                        components.html(pdf_viewer_html(pdf_preview(pdf_data, page), page),
+                                        height=570, scrolling=False)
                     except Exception:
                         st.info("Page preview is unavailable; check the original PDF.")
             with right:
                 st.caption("Extracted text · save edits before changing pages")
                 with st.form(f"page_edit_{page}_{st.session_state.get('edit_revision', 0)}"):
-                    edited = st.text_area("Page text", value=blocks[page], height=400, disabled=busy)
+                    edited = st.text_area("Page text", value=blocks[page], height=520, disabled=busy)
                     if st.form_submit_button("Save page edits", type="primary", disabled=busy):
                         updated = replace_page_text(text, page, edited)
                         if apply_text_edit(updated):
@@ -4516,7 +4562,7 @@ def render_ocr_review(pdf_data, busy):
     a.download_button("Download text (.txt)", text, file_name=f"{base}_ocr.txt", mime="text/plain", use_container_width=True)
     b.download_button("Download Markdown (.md)", text, file_name=f"{base}_ocr.md", mime="text/markdown", use_container_width=True)
     if checks:
-        st.download_button("Download reading checks (.json)", json.dumps(checks, ensure_ascii=False, indent=2),
+        st.download_button("Download reading checks", json.dumps(checks, ensure_ascii=False, indent=2),
                            file_name=f"{base}_reading_checks.json", mime="application/json")
 
 
@@ -4553,13 +4599,13 @@ def render_record():
             st.caption(str(meeting.get("date") or "Date not found"))
             if meeting.get("presentees"):
                 st.dataframe(meeting["presentees"], use_container_width=True, hide_index=True)
-            st.caption("Download the JSON to get every agenda item, formatted table, and resolution.")
+            st.caption("Download the meeting record to get every agenda item, formatted table, and resolution.")
         elif view == "Collapsible tree":
             with scroll_box(460):
                 st.json(meeting, expanded=False)
         else:
             code_block(st.session_state["json_result"], "json", 460)
-    st.download_button("Download meeting record (.json)", st.session_state["json_result"],
+    st.download_button("Download meeting record", st.session_state["json_result"],
                        file_name=st.session_state.get("ocr_filename", "meeting") + ".json", mime="application/json", use_container_width=True)
 
 
@@ -4588,7 +4634,7 @@ def render_app():
         with st.expander("Processing notes"):
             for note in st.session_state["job_notes"]:
                 st.write(note)
-    if job is not None:
+    if job is not None and job.stage == "ocr":
         render_progress()
     st.markdown('<div class="ec-section"><span class="ec-number">1</span><h2>Read the document</h2></div>', unsafe_allow_html=True)
     st.caption("Upload the PDF you want to process. Previously saved results open without another AI request.")
@@ -4688,6 +4734,7 @@ def render_app():
             st.error("Add GEMINI_API_KEYS in Streamlit Secrets to generate a new record.")
             return
         else:
+            st.progress(0.0, text="Starting the meeting record…")
             new_job = ProcessingJob("json", json_key, source_digest, json_settings)
             try:
                 st.session_state["active_job_id"] = start_job(new_job, run_json_job, full_text, reuse, api_keys)
@@ -4695,16 +4742,18 @@ def render_app():
                 st.error(str(error))
                 return
         st.rerun()
+    if job is not None and job.stage == "json":
+        render_progress()  # Keep record progress beside its action and result.
     render_record()
     entries = [st.session_state.get("ocr_entry"), st.session_state.get("json_entry")]
     if any(entries):
         with st.expander("Keep this document ready for your presentation"):
-            st.caption("Download a backup after both steps finish. Restore it here, or put its processed_cache folder beside your app in GitHub. Cloud-generated files are not automatically saved to your repository.")
+            st.caption("Download a backup after both steps finish. Put its processed_cache folder beside your app in GitHub to restore saved results. Cloud-generated files are not automatically saved to your repository.")
             st.download_button("Download document backup (.zip)", make_backup(entries),
                                file_name=st.session_state.get("ocr_filename", "meeting") + "_backup.zip", mime="application/zip", use_container_width=True)
     have_text, have_record = bool(st.session_state.get("ocr_entry")), bool(st.session_state.get("json_entry"))
     states = ["complete" if have_text else "active", "complete" if have_record else ("active" if have_text else ""), "complete" if have_record else ""]
-    steps.markdown('<div class="ec-steps">' + ''.join(f'<div class="ec-step {state}"><b><span>{num}</span>{title}</b><small>{subtitle}</small></div>' for state, num, title, subtitle in zip(states, ["01", "02", "03"], ["Read", "Review", "Export"], ["PDF → extracted text", "Check names & details", "Text, JSON & backup"])) + '</div>', unsafe_allow_html=True)
+    steps.markdown('<div class="ec-steps">' + ''.join(f'<div class="ec-step {state}"><b><span>{num}</span>{title}</b><small>{subtitle}</small></div>' for state, num, title, subtitle in zip(states, ["01", "02", "03"], ["Read", "Review", "Export"], ["PDF → extracted text", "Check names & details", "Text, meeting record & backup"])) + '</div>', unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
